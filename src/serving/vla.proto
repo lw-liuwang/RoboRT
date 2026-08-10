@@ -1,0 +1,65 @@
+// Copyright 2026 VinRobotics
+// Source: VinRobotics/vla.cpp
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package vla;
+
+message Image {
+
+  enum Encoding {
+    JPEG       = 0;
+    RGB_U8     = 1;
+    F32_RGB_01 = 2;
+  }
+  Encoding encoding = 1;
+  uint32   height   = 2;
+  uint32   width    = 3;
+  bytes    data     = 4;
+}
+
+message PredictRequest {
+
+  repeated Image images = 1;
+
+  repeated int32 lang_tokens = 2;
+
+  repeated float state = 3;
+
+  repeated float noise = 4;
+
+  uint64 request_id = 5;
+
+  repeated float precomputed_img_emb         = 6;
+  uint32         precomputed_img_emb_n_views = 7;
+
+  repeated uint32 attention_mask = 8;
+}
+
+message PredictResponse {
+  uint64 request_id = 1;
+
+  repeated float action_chunk = 2;
+  uint32         chunk_size   = 3;
+  uint32         action_dim   = 4;
+
+  float latency_ms_total     = 5;
+  float latency_ms_inference = 6;
+  float latency_ms_prefill   = 8;
+  float latency_ms_denoise   = 9;
+  float latency_ms_vision    = 10;
+
+  string error = 7;
+}
