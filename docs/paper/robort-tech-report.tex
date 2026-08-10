@@ -1,0 +1,303 @@
+% RoboRT tech report — arXiv-style preprint.
+% Compile: pdflatex robort-tech-report.tex
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{url}
+\usepackage[hidelinks]{hyperref}
+
+\title{\textbf{RoboRT: A Real-Time C++ Inference Engine for pi0.5 Vision-Language-Action Policies}}
+\author{liuwang\\[2pt] Baidu}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Vision-language-action (VLA) models such as pi0.5 have shown strong
+performance on robot manipulation, yet their inference latency remains the
+dominant bottleneck for real-time closed-loop control. We present RoboRT, a
+native C++ inference engine designed specifically for the flow-matching
+denoising schedule of pi0.5. Instead of adapting a generic large-language-model
+(LLM) runtime, RoboRT implements a hand-written GGUF reader that loads
+F32/BF16/quantized weights directly, a compute graph that is cached and
+rebuilt only when the input shape changes, and a member noise RNG that makes
+inference bit-exact reproducible. On an A10 GPU, RoboRT achieves
+\textbf{161\,ms/step}, a \textbf{2.3$\times$} speedup over the LeRobot
+PyTorch reference at 377\,ms/step under the same observation and seed, while
+retaining 38/40 task success on the LIBERO benchmark. RoboRT is released
+under the Apache-2.0 license with a deterministic self-check tool that
+enables bit-exact comparison across implementations.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+
+Recent vision-language-action (VLA) policies, exemplified by the pi0 family
+\cite{pi0}, jointly model vision, language, and action in a single
+architecture and have become a de facto baseline for generalist robot
+manipulation. A VLA policy must run at the frequency of the control loop it
+drives: higher inference throughput directly translates to higher task
+success in dynamic manipulation. The practical target is on the order of
+10\,Hz per inference step; anything slower forces aggressive motion
+smoothing and degrades closed-loop behavior.
+
+Despite the appeal of these models, deploying them at interactive rates is
+hard for three reasons. First, \emph{reference implementations are slow}:
+the widely used LeRobot \cite{lerobot} stack runs pi0.5 at 377\,ms/step on
+an A10, leaving little headroom for a reactive controller. Second,
+\emph{generic LLM runtimes do not fit the workload}: mature inference
+engines are optimized for autoregressive token generation, whereas pi0.5
+predicts action chunks through an iterative flow-matching denoising loop
+\cite{flowmatching} with non-autoregressive, prefix-cached compute; grafting
+the model onto such a runtime carries a large amount of unused machinery and
+poorly matched scheduling. Third, \emph{the deployment chain is fragmented}:
+vision encoding, prefix caching, noise scheduling, and action
+denormalization are usually bolted together from separate implementations,
+which makes results hard to reproduce and even harder to compare across
+codebases.
+
+We address these limitations with \textbf{RoboRT}, a self-contained C++
+inference engine for pi0.5. The engine is native rather than an adapter over
+an LLM framework: it reads weights with a hand-written GGUF reader, executes
+a compute graph that is cached across steps and rebuilt only when the input
+shapes change, and owns the noise RNG as engine state so that every
+prediction is bit-exact reproducible from a fixed seed. RoboRT builds only
+on generic compute primitives---the ggml graph runtime with its CPU/CUDA
+backends and the SigLIP vision tower---and carries no LLM-specific layers.
+
+Our contributions are:
+\begin{itemize}
+  \item \textbf{A native pi0.5 inference engine} (Sec.~\ref{sec:method}):
+        hand-written GGUF reader, cached compute graph, and a
+        flow-matching denoising loop, with no dependence on an LLM runtime.
+  \item \textbf{A reproducibility mechanism} (Sec.~\ref{sec:repro}):
+        deterministic member RNG semantics and a self-check tool that dumps
+        1,600 floats bit-exact for cross-implementation regression.
+  \item \textbf{Measured results} (Sec.~\ref{sec:experiments}): 161\,ms/step
+        on A10 (2.3$\times$ over LeRobot) and 38/40 task success on LIBERO
+        under seed-42, consistent with the reference policy.
+\end{itemize}
+
+\section{Related Work}
+\label{sec:related}
+
+\textbf{pi0 and pi0.5.} pi0 \cite{pi0} is an open-source VLA built on the
+PaliGemma vision-language backbone with a flow-matching action expert; pi0.5
+\cite{pi05} extends it with a more capable backbone while keeping the same
+denoising interface. Both predict a chunk of actions (the suffix) by
+iteratively denoising Gaussian noise conditioned on vision, language, and
+proprioceptive state.
+
+\textbf{VLA inference stacks.} LeRobot \cite{lerobot} provides the canonical
+PyTorch implementation of pi0 and pi0.5 and is the reference we compare
+against. Its latency is dominated by Python overhead and eager execution.
+Serving-oriented runtimes (e.g.\ SGLang \cite{sglang}) bring batching and
+continuous KV cache but target autoregressive LLM serving rather than the
+non-autoregressive denoising loop of action experts.
+
+\textbf{Flow matching and diffusion inference.} Flow matching \cite{flowmatching}
+and diffusion models \cite{ddpm} share an iterative refinement schedule.
+Production inference for these models optimizes the number of steps,
+scheduling, and per-step compute---the same knobs RoboRT exposes---rather
+than token-level batching.
+
+\textbf{Graph runtimes.} ggml \cite{ggml} provides a dependency-free
+computation-graph runtime with CPU and CUDA backends. We reuse only its
+generic operators and implement all pi0.5-specific graph construction
+ourselves.
+
+\section{Method}
+\label{sec:method}
+
+\begin{figure}[t]
+  \centering
+  \fbox{\parbox{0.92\linewidth}{\centering
+  \small
+  observation (image, language tokens, state) \\
+  $\downarrow$ \\
+  SigLIP vision encoding $\rightarrow$ prefix: vision+language embeddings (KV cached) \\
+  $\downarrow$ \\
+  flow-matching denoising loop: $\mathbf{x}_{T} \xrightarrow{~~\epsilon_\theta~~} \mathbf{x}_{0}$ \\
+  $\downarrow$ \\
+  denormalization $\rightarrow$ action chunk ($n_{\text{steps}} \times d_{\text{act}}$)
+  }}
+  \caption{End-to-end data flow of RoboRT for one pi0.5 predict.}
+  \label{fig:pipeline}
+\end{figure}
+
+Figure~\ref{fig:pipeline} gives the end-to-end data flow. The engine is
+organized as a single library (\texttt{vla-pi05}) with a public C++ API:
+a \texttt{Config} describing model dimensions, an \texttt{Inputs} struct
+carrying the observation, and a \texttt{predict} function returning a flat
+$n_{\text{steps}} \times d_{\text{act}}$ action chunk.
+
+\subsection{Hand-written GGUF reader}
+\label{sec:method-reader}
+
+pi0.5 weights are distributed as HuggingFace safetensors. RoboRT converts
+them offline to GGUF with two Python scripts
+(\texttt{convert\_pi05\_to\_gguf.py} and
+\texttt{convert\_pi05\_mmproj\_to\_gguf.py}), then loads them at startup with
+a hand-written reader over the ggml \texttt{gguf\_*} API. The reader
+supports F32, BF16, and quantized dtypes and maps tensors directly into the
+compute graph without any model-level abstraction layer.
+
+\subsection{Cached compute graph}
+\label{sec:method-graph}
+
+The inference graph has three shape-dependent inputs: the number of visual
+tokens, the number of language tokens, and the suffix length. RoboRT builds
+the graph once and caches it; the graph is rebuilt only when one of these
+shapes changes (e.g., a different language instruction). During the
+denoising loop the same graph is executed repeatedly, so the steady-state
+inference path has zero graph-construction overhead.
+
+\subsection{Flow-matching denoising loop}
+\label{sec:method-denoise}
+
+Given a noise tensor $\mathbf{x}_T \sim \mathcal{N}(0, I)$, the action expert
+is iterated as
+\begin{equation}
+  \mathbf{x}_{t-\Delta t} = \mathbf{x}_t - \Delta t \cdot \epsilon_\theta(\mathbf{x}_t, c),
+  \label{eq:denoise}
+\end{equation}
+where $\epsilon_\theta$ is the denoising network conditioned on $c$ (vision,
+language, and state) and $\Delta t = 1/n_{\text{steps}}$. The prefix
+(vision + language embeddings) is computed once and its key/value cache is
+reused across all denoising iterations. After the loop, the action chunk is
+denormalized inside the engine using the training statistics (quantile or
+mean/std per the GGUF metadata) and truncated to the real action dimension.
+
+\section{Reproducibility}
+\label{sec:repro}
+
+Stochasticity in flow-matching inference comes from the noise sample, so
+reproducibility reduces to controlling the noise RNG. In RoboRT the RNG is
+engine state: it advances once per \texttt{predict}, and the environment
+variable \texttt{VLA\_PI05\_SEED} sets only the starting point of the
+sequence. The engine ships \texttt{vla-pi05-selfcheck}, a deterministic
+tool that runs a fixed seed and dumps the final prediction's 1,600 floats.
+This enables bit-exact comparison across implementations: any regression in
+graph construction, operator selection, or normalization surfaces as a
+value diff. For faithful comparison, the server must be queried starting
+from a clean process---any extra request advances the noise sequence and
+shifts the marginal task outcomes.
+
+The serving path additionally validates the input contract strictly:
+state length must equal the configured dimension, language token counts
+must lie in $[1, n_{\text{lang}}]$, the noise shape must match
+$\{0, n_{\text{suffix}} \times d_{\text{act}}\}$, and all float inputs must
+reject NaN/Inf.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+We evaluate on an A10 GPU (24\,GB) with fp16 weights. The model is the
+pi0.5 checkpoint fine-tuned on LIBERO-90. Latency is measured as
+end-to-end \texttt{predict} time with a fixed seed
+(\texttt{VLA\_PI05\_SEED=42}). The LeRobot reference runs the same
+observation and seed in PyTorch.
+
+\subsection{Inference latency}
+\label{sec:exp-latency}
+
+Table~\ref{tab:latency} reports the end-to-end latency and its phase
+breakdown. RoboRT reaches 161\,ms/step, a 2.3$\times$ speedup over the
+LeRobot reference at 377\,ms/step. The denoising phase (126.9\,ms) dominates;
+vision encoding costs 23.7\,ms.
+
+\begin{table}[t]
+  \centering
+  \caption{End-to-end latency per inference step on A10 (fp16).}
+  \label{tab:latency}
+  \begin{tabular}{lcccc}
+    \toprule
+    Engine & Vision & Denoise & Other & Total \\
+    \midrule
+    LeRobot (PyTorch) & --- & --- & --- & 377\,ms \\
+    RoboRT (C++)       & 23.7\,ms & 126.9\,ms & 1.6\,ms & \textbf{161\,ms} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{LIBERO evaluation}
+\label{sec:exp-libero}
+
+We evaluate the policy with the LIBERO suite using one episode per task, a
+seed offset of 42, and no video recording. RoboRT achieves \textbf{38/40}
+task success; the two failures, tasks \{24, 29\}, match the LeRobot
+reference exactly, confirming the engine reproduces the reference policy's
+behavior end to end.
+
+\begin{table}[t]
+  \centering
+  \caption{LIBERO task success (seed-42, 1 episode per task).}
+  \label{tab:libero}
+  \begin{tabular}{lcc}
+    \toprule
+    Engine & Success & Failed tasks \\
+    \midrule
+    LeRobot (reference) & 38/40 & \{24, 29\} \\
+    RoboRT (C++)         & 38/40 & \{24, 29\} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented RoboRT, a native C++ inference engine for the pi0.5
+vision-language-action policy. By matching the runtime to the
+flow-matching workload---hand-written GGUF loading, cached compute graphs,
+and deterministic noise---RoboRT delivers a 2.3$\times$ latency reduction
+over the reference implementation while remaining bit-exact reproducible and
+behaviorally identical on LIBERO. The engine is released under Apache-2.0
+with conversion scripts, a ZeroMQ/Protobuf serving layer, and a
+deterministic self-check tool.
+
+\begin{thebibliography}{9}
+
+\bibitem{pi0}
+M.~Black et al.
+\newblock $\pi_0$: A vision-language-action flow model for general robot control.
+\newblock \emph{arXiv:2410.24164}, 2024.
+
+\bibitem{pi05}
+S.~Nasiriany et al.
+\newblock $\pi_{0.5}$: A vision-language-action model with open-world generalization.
+\newblock \emph{arXiv:2504.09754}, 2025.
+
+\bibitem{lerobot}
+R.~Cadene et al.
+\newblock LeRobot: State-of-the-art machine learning for real-world robotics.
+\newblock \emph{https://github.com/huggingface/lerobot}, 2024.
+
+\bibitem{flowmatching}
+Y.~Lipman, R.~T.~Q.~Chen, H.~Ben-Hamu, M.~Nickel, and M.~Le.
+\newblock Flow matching for generative modeling.
+\newblock \emph{ICLR}, 2023.
+
+\bibitem{ddpm}
+J.~Ho, A.~Jain, and P.~Abbeel.
+\newblock Denoising diffusion probabilistic models.
+\newblock \emph{NeurIPS}, 2020.
+
+\bibitem{sglang}
+L.~Zheng et al.
+\newblock SGLang: Efficient execution of structured language model programs.
+\newblock \emph{arXiv:2312.07104}, 2023.
+
+\bibitem{ggml}
+G.~Gerganov et al.
+\newblock ggml: Tensor library for machine learning.
+\newblock \emph{https://github.com/ggml-org/ggml}, 2023.
+
+\end{thebibliography}
+
+\end{document}

@@ -37,3 +37,17 @@ core.*
 # ── 环境变量 / 密钥 ───────────────────────────────────────
 .env
 .env.*
+
+# ── LaTeX 编译中间产物（docs/paper/*.pdf 保留入库）────────
+*.aux
+*.out
+*.toc
+*.lof
+*.lot
+*.nav
+*.snm
+*.bbl
+*.blg
+*.synctex.gz
+*.fls
+*.fdb_latexmk
