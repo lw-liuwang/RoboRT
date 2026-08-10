@@ -27,11 +27,12 @@ denoising schedule of pi0.5. Instead of adapting a generic large-language-model
 F32/BF16/quantized weights directly, a compute graph that is cached and
 rebuilt only when the input shape changes, and a member noise RNG that makes
 inference bit-exact reproducible. On an A10 GPU, RoboRT achieves
-\textbf{161\,ms/step}, a \textbf{2.3$\times$} speedup over the LeRobot
-PyTorch reference at 377\,ms/step under the same observation and seed, while
-retaining 38/40 task success on the LIBERO benchmark. RoboRT is released
-under the Apache-2.0 license with a deterministic self-check tool that
-enables bit-exact comparison across implementations.
+\textbf{161\,ms/step} (6.2\,Hz), a \textbf{2.3$\times$} speedup over the
+LeRobot PyTorch reference at 377\,ms/step (2.7\,Hz) under the same
+observation and seed, while retaining 38/40 task success on the LIBERO
+benchmark. RoboRT is released under the Apache-2.0 license with a
+deterministic self-check tool that enables bit-exact comparison across
+implementations.
 \end{abstract}
 
 \section{Introduction}
@@ -49,14 +50,17 @@ smoothing and degrades closed-loop behavior.
 Despite the appeal of these models, deploying them at interactive rates is
 hard for three reasons. First, \emph{reference implementations are slow}:
 the widely used LeRobot \cite{lerobot} stack runs pi0.5 at 377\,ms/step on
-an A10, leaving little headroom for a reactive controller. Second,
-\emph{generic LLM runtimes do not fit the workload}: mature inference
-engines are optimized for autoregressive token generation, whereas pi0.5
-predicts action chunks through an iterative flow-matching denoising loop
-\cite{flowmatching} with non-autoregressive, prefix-cached compute; grafting
-the model onto such a runtime carries a large amount of unused machinery and
-poorly matched scheduling. Third, \emph{the deployment chain is fragmented}:
-vision encoding, prefix caching, noise scheduling, and action
+an A10, sustaining only 2.7\,Hz---a small fraction of the 10\,Hz target and
+leaving little headroom for a reactive controller. Second, \emph{generic
+LLM runtimes do not fit the workload}: mature inference engines are
+optimized for autoregressive token generation with continuous batching,
+speculative decoding, and KV-cache paging, whereas pi0.5 predicts action
+chunks through an iterative flow-matching denoising loop \cite{flowmatching}
+in which the entire chunk is processed in parallel over a fixed number of
+steps, each sharing one precomputed visual-language prefix. Grafting the
+model onto such a runtime carries a large amount of unused machinery and a
+poorly matched scheduling model. Third, \emph{the deployment chain is
+fragmented}: vision encoding, prefix caching, noise scheduling, and action
 denormalization are usually bolted together from separate implementations,
 which makes results hard to reproduce and even harder to compare across
 codebases.
@@ -68,7 +72,13 @@ a compute graph that is cached across steps and rebuilt only when the input
 shapes change, and owns the noise RNG as engine state so that every
 prediction is bit-exact reproducible from a fixed seed. RoboRT builds only
 on generic compute primitives---the ggml graph runtime with its CPU/CUDA
-backends and the SigLIP vision tower---and carries no LLM-specific layers.
+backends and the SigLIP \cite{siglip} vision tower---and carries no
+LLM-specific layers.
+
+At 161\,ms/step (6.2\,Hz), RoboRT closes more than half of the gap to the
+interactive control regime on the same A10 hardware, and its per-phase
+breakdown shows that denoising---not vision encoding---dominates, pointing
+to clear headroom for future work (Sec.~\ref{sec:exp-latency}).
 
 Our contributions are:
 \begin{itemize}
@@ -96,7 +106,7 @@ proprioceptive state.
 \textbf{VLA inference stacks.} LeRobot \cite{lerobot} provides the canonical
 PyTorch implementation of pi0 and pi0.5 and is the reference we compare
 against. Its latency is dominated by Python overhead and eager execution.
-Serving-oriented runtimes (e.g.\ SGLang \cite{sglang}) bring batching and
+Serving-oriented runtimes (e.g. SGLang \cite{sglang}) bring batching and
 continuous KV cache but target autoregressive LLM serving rather than the
 non-autoregressive denoising loop of action experts.
 
@@ -106,10 +116,17 @@ Production inference for these models optimizes the number of steps,
 scheduling, and per-step compute---the same knobs RoboRT exposes---rather
 than token-level batching.
 
-\textbf{Graph runtimes.} ggml \cite{ggml} provides a dependency-free
-computation-graph runtime with CPU and CUDA backends. We reuse only its
-generic operators and implement all pi0.5-specific graph construction
-ourselves.
+\textbf{Graph runtimes and vision encoders.} ggml \cite{ggml} provides a
+dependency-free computation-graph runtime with CPU and CUDA backends. We
+reuse only its generic operators and implement all pi0.5-specific graph
+construction ourselves. The vision tower is the SigLIP \cite{siglip}
+encoder, executed as a standalone graph whose output is spliced into the
+language-model prefix.
+
+\textbf{Benchmarks.} LIBERO \cite{libero} is a suite of scripted
+long-horizon manipulation tasks that has become a standard evaluation
+ground for VLA policies; we use it to confirm that RoboRT preserves the
+reference policy's behavior end to end.
 
 \section{Method}
 \label{sec:method}
@@ -145,17 +162,23 @@ them offline to GGUF with two Python scripts
 \texttt{convert\_pi05\_mmproj\_to\_gguf.py}), then loads them at startup with
 a hand-written reader over the ggml \texttt{gguf\_*} API. The reader
 supports F32, BF16, and quantized dtypes and maps tensors directly into the
-compute graph without any model-level abstraction layer.
+compute graph without any model-level abstraction layer. The GGUF metadata
+is the single source of configuration: model dimensions, the action
+normalization mode (quantile or mean/std), and the denoising step count are
+read from the weight file rather than baked into C++ constants, so
+retraining or re-quantizing never requires recompilation.
 
 \subsection{Cached compute graph}
 \label{sec:method-graph}
 
 The inference graph has three shape-dependent inputs: the number of visual
-tokens, the number of language tokens, and the suffix length. RoboRT builds
-the graph once and caches it; the graph is rebuilt only when one of these
-shapes changes (e.g., a different language instruction). During the
-denoising loop the same graph is executed repeatedly, so the steady-state
-inference path has zero graph-construction overhead.
+tokens, the number of language tokens, and the suffix length. RoboRT keys
+its graph cache on this triple: the graph is built once per unique shape and
+rebuilt only when one of the three changes (e.g., a different language
+instruction). All $n_{\text{steps}}$ iterations of one \texttt{predict}
+share a single graph, and later \texttt{predict} calls with unchanged shapes
+reuse it directly, so the steady-state inference path has zero
+graph-construction overhead.
 
 \subsection{Flow-matching denoising loop}
 \label{sec:method-denoise}
@@ -171,7 +194,8 @@ language, and state) and $\Delta t = 1/n_{\text{steps}}$. The prefix
 (vision + language embeddings) is computed once and its key/value cache is
 reused across all denoising iterations. After the loop, the action chunk is
 denormalized inside the engine using the training statistics (quantile or
-mean/std per the GGUF metadata) and truncated to the real action dimension.
+mean/std, per the GGUF metadata) and truncated to the real action dimension
+$d_{\text{act}}$.
 
 \section{Reproducibility}
 \label{sec:repro}
@@ -209,19 +233,25 @@ observation and seed in PyTorch.
 
 Table~\ref{tab:latency} reports the end-to-end latency and its phase
 breakdown. RoboRT reaches 161\,ms/step, a 2.3$\times$ speedup over the
-LeRobot reference at 377\,ms/step. The denoising phase (126.9\,ms) dominates;
-vision encoding costs 23.7\,ms.
+LeRobot reference at 377\,ms/step---equivalently 6.2\,Hz versus 2.7\,Hz,
+more than halving the gap to the 10\,Hz control target. Within RoboRT,
+denoising dominates at 126.9\,ms (79\% of the total), while vision encoding
+costs 23.7\,ms (15\%) and the remaining serving overhead is 1.6\,ms. The
+distribution indicates that further gains lie mainly in the denoising phase:
+fewer flow-matching steps, operator fusion inside the denoising layers, and
+CUDA-graph capture of the repeated iterations are all viable directions we
+are pursuing.
 
 \begin{table}[t]
   \centering
   \caption{End-to-end latency per inference step on A10 (fp16).}
   \label{tab:latency}
-  \begin{tabular}{lcccc}
+  \begin{tabular}{lccccc}
     \toprule
-    Engine & Vision & Denoise & Other & Total \\
+    Engine & Vision & Denoise & Other & Total & Speedup \\
     \midrule
-    LeRobot (PyTorch) & --- & --- & --- & 377\,ms \\
-    RoboRT (C++)       & 23.7\,ms & 126.9\,ms & 1.6\,ms & \textbf{161\,ms} \\
+    LeRobot (PyTorch) & --- & --- & --- & 377\,ms & 1.0$\times$ \\
+    RoboRT (C++)       & 23.7\,ms & 126.9\,ms & 1.6\,ms & \textbf{161\,ms} & 2.3$\times$ \\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -229,11 +259,11 @@ vision encoding costs 23.7\,ms.
 \subsection{LIBERO evaluation}
 \label{sec:exp-libero}
 
-We evaluate the policy with the LIBERO suite using one episode per task, a
-seed offset of 42, and no video recording. RoboRT achieves \textbf{38/40}
-task success; the two failures, tasks \{24, 29\}, match the LeRobot
-reference exactly, confirming the engine reproduces the reference policy's
-behavior end to end.
+We evaluate the policy with the LIBERO \cite{libero} suite using one episode
+per task, a seed offset of 42, and no video recording. RoboRT achieves
+\textbf{38/40} task success; the two failures, tasks \{24, 29\}, match the
+LeRobot reference exactly, confirming the engine reproduces the reference
+policy's behavior end to end.
 
 \begin{table}[t]
   \centering
@@ -297,6 +327,16 @@ L.~Zheng et al.
 G.~Gerganov et al.
 \newblock ggml: Tensor library for machine learning.
 \newblock \emph{https://github.com/ggml-org/ggml}, 2023.
+
+\bibitem{siglip}
+X.~Zhai, B.~Mustafa, A.~Kolesnikov, and L.~Beyer.
+\newblock Sigmoid loss for language image pre-training.
+\newblock \emph{ICCV}, 2023.
+
+\bibitem{libero}
+B.~Liu, Y.~Zhu, C.~Gao, Y.~Feng, Q.~Liu, Y.~Zhu, and P.~Stone.
+\newblock LIBERO: Benchmarking knowledge transfer for lifelong robot learning.
+\newblock \emph{NeurIPS}, 2023.
 
 \end{thebibliography}
 
