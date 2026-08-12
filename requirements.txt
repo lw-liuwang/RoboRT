@@ -1,0 +1,6 @@
+# Python dependencies for the model conversion scripts
+# (src/models/pi05/convert_*_to_gguf.py).
+# The gguf package is vendored under third_party/gguf-py and is not listed here.
+torch>=2.0
+numpy>=1.24
+safetensors>=0.4

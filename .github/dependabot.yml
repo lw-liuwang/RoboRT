@@ -1,0 +1,9 @@
+# Dependabot version updates.
+# Keep the Python dependencies of the model conversion scripts up to date;
+# automated pull requests land here so they can be merged without review.
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
