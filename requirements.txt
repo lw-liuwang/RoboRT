@@ -3,4 +3,4 @@
 # The gguf package is vendored under third_party/gguf-py and is not listed here.
 torch==2.4.0
 numpy==2.5.1
-safetensors==0.4.3
+safetensors==0.8.0
