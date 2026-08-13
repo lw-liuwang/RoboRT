@@ -22,8 +22,10 @@ namespace serving {
 //   srv.run();  // blocks until SIGINT/SIGTERM
 class ZmqServerBase {
   public:
-    /// Construct and bind the ZMQ REP socket.
-    explicit ZmqServerBase(const std::string & bind_addr);
+    /// Construct and bind the ZMQ socket.  REP by default; ROUTER can be
+    /// requested (used by the async server pipeline for true pipelining).
+    explicit ZmqServerBase(const std::string & bind_addr,
+                           zmq::socket_type   type = zmq::socket_type::rep);
     virtual ~ZmqServerBase();
 
     ZmqServerBase(const ZmqServerBase &)             = delete;
@@ -34,7 +36,7 @@ class ZmqServerBase {
     virtual std::string handle_request(const uint8_t * data, size_t size) = 0;
 
     /// Blocking poll / recv / send loop.  Returns after signal_shutdown.
-    void run();
+    virtual void run();
 
     /// Number of successfully completed requests.
     uint64_t served() const { return served_; }
@@ -45,10 +47,11 @@ class ZmqServerBase {
     /// Programmatic shutdown.
     void shutdown() { s_shutdown_.store(true, std::memory_order_relaxed); }
 
-  private:
+  protected:
+    /// Signal-safe shutdown flag; readable by derived servers (e.g. the async
+    /// ROUTER pipeline) to know when to stop their poll loops.
     static std::atomic<bool> s_shutdown_;
 
-  protected:
     zmq::context_t zctx_;
     zmq::socket_t  sock_;
     std::string    bind_addr_;

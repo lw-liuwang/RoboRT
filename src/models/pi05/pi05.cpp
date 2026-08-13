@@ -31,6 +31,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <string>
 #include <thread>
@@ -427,9 +428,12 @@ struct Pi05Model final : public Model {
     ~Pi05Model() override;
 
     std::vector<float> predict(const Inputs & in);
+    PreparedInput      prepare_inputs(const Inputs & in);
+    std::vector<float> compute_actions(const PreparedInput & p);
 
     Stats  stats{};  ///< Phase timings of the most recent predict.
     Config cfg{};    ///< Resolved model hyper-parameters.
+    std::mutex stats_mu_;  ///< Guards @ref stats (async server: two threads).
 
     clip_ctx *            cctx        = nullptr;
     ggml_backend_t        backend     = nullptr;
@@ -467,6 +471,57 @@ struct Pi05Model final : public Model {
     int64_t                    c_n_img_tokens_ = -1;
     int64_t                    c_n_lang_       = -1;
     int64_t                    c_n_suf_        = -1;
+
+    // RTC (Real-Time Chunking) cached-graph inputs: prev_chunk prefix guidance
+    // and the per-step schedule weights. Both are uploaded every request.
+    ggml_tensor * t_prev_chunk_  = nullptr;   // [max_ad, chunk] latent leftover
+    ggml_tensor * t_rtc_weights_ = nullptr;   // [max_ad, chunk] schedule weights
+    int64_t c_rtc_         = 0;               // rtc_enabled_ at graph-build time
+    int64_t c_rtc_horizon_ = 0;               // rtc_horizon_ at graph-build time
+
+    // RTC configuration (read from env once; default off = bit-exact baseline).
+    bool rtc_initialized_ = false;
+    bool rtc_enabled_     = false;
+    int  rtc_horizon_     = 10;               // execution horizon (VLA_PI05_RTC_HORIZON)
+    int  rtc_delay_       = 0;                // inference delay prefix (VLA_PI05_RTC_DELAY)
+    float rtc_max_guidance_ = 10.0f;          // max guidance weight (VLA_PI05_RTC_GUIDANCE)
+    std::string rtc_schedule_ = "linear";     // linear / ones / exp (VLA_PI05_RTC_SCHEDULE)
+    bool rtc_x0_inpaint_  = false;            // inject leftover into x0 (VLA_PI05_RTC_X0_INPAINT)
+    std::vector<float> rtc_step_guidance_;    // per-step guidance weight [num_steps]
+
+    void init_rtc_config() {
+        if (rtc_initialized_) return;
+        rtc_initialized_ = true;
+        if (const char * e = std::getenv("VLA_PI05_RTC"); e && std::atoi(e) > 0) rtc_enabled_ = true;
+        if (const char * e = std::getenv("VLA_PI05_RTC_HORIZON");  e && std::atoi(e) >= 1)  rtc_horizon_  = std::atoi(e);
+        if (const char * e = std::getenv("VLA_PI05_RTC_DELAY");    e && std::atoi(e) >= 0)  rtc_delay_    = std::atoi(e);
+        if (const char * e = std::getenv("VLA_PI05_RTC_GUIDANCE"); e && std::atof(e) > 0.f) rtc_max_guidance_ = (float) std::atof(e);
+        if (const char * e = std::getenv("VLA_PI05_RTC_SCHEDULE"); e && e[0])               rtc_schedule_ = e;
+        if (const char * e = std::getenv("VLA_PI05_RTC_X0_INPAINT"); e && std::atoi(e) > 0) rtc_x0_inpaint_ = true;
+        if (rtc_enabled_) {
+            // Per-step guidance weight (LeRobot modeling_rtc.denoise_step):
+            //   tau = 1 - time; c = time/tau;
+            //   inv_r2 = (time^2 + tau^2) / time^2;
+            //   guidance = min(c*inv_r2, max);  time = 1 -> 1/N (tau = s/N).
+            const int num_steps = (int) cfg.num_steps;
+            const float max_g = rtc_max_guidance_;
+            rtc_step_guidance_.assign(num_steps, max_g);
+            for (int s = 0; s < num_steps; ++s) {
+                const float time = 1.0f - (float) s / (float) num_steps;
+                const float tau  = (float) s / (float) num_steps;
+                if (tau > 0.f) {
+                    const float c      = time / tau;
+                    const float inv_r2 = (time * time + tau * tau) / (time * time);
+                    float g = c * inv_r2;
+                    if (!(g > 0.f) || g > max_g) g = max_g; // NaN/Inf -> clamp to max
+                    rtc_step_guidance_[s] = g;
+                }
+            }
+            std::printf("vla(pi05): RTC enabled: horizon=%d delay=%d guidance=%.1f schedule=%s inpaint=%d steps=%d\n",
+                        rtc_horizon_, rtc_delay_, rtc_max_guidance_, rtc_schedule_.c_str(),
+                        rtc_x0_inpaint_ ? 1 : 0, num_steps);
+        }
+    }
 
     // State stats are kept for the Python client prompt path; C++ inference
     // itself receives already-tokenized text and therefore only unnormalizes actions.
@@ -1104,31 +1159,38 @@ std::vector<float> predict(Model * m, const Inputs & in) {
     return static_cast<Pi05Model *>(m)->predict(in);
 }
 
-std::vector<float> Pi05Model::predict(const Inputs & in) {
-    using clk     = std::chrono::high_resolution_clock;
-    const auto t0 = clk::now();
-    stats         = Stats{};
+PreparedInput prepare(Model * m, const Inputs & in) {
+    return static_cast<Pi05Model *>(m)->prepare_inputs(in);
+}
+
+std::vector<float> compute(Model * m, const PreparedInput & p) {
+    return static_cast<Pi05Model *>(m)->compute_actions(p);
+}
+
+PreparedInput Pi05Model::prepare_inputs(const Inputs & in) {
+    using clk = std::chrono::high_resolution_clock;
+    {
+        std::lock_guard<std::mutex> lk(stats_mu_);
+        stats = Stats{};
+    }
 
     const Config & cfg       = this->cfg;
     const int64_t  hidden_pl = cfg.hidden;
-    const int64_t  hidden_ex = cfg.expert_h;
     const int64_t  chunk     = cfg.n_suffix;
-    const int64_t  n_suf     = chunk;
-    const int64_t  n_layers  = cfg.n_layers;
-    const int64_t  max_ad    = cfg.max_action_dim;
-    const int      num_steps = cfg.num_steps;
-    const float    dt        = -1.0f / (float) num_steps;
-    const float    rope_base = cfg.rope_freq_base;
 
-    std::vector<float> img_emb_host;
-    int64_t            n_img_tokens = 0;
+    PreparedInput p;
+    int64_t       n_img_tokens = 0;
+
     if (in.precomputed_img_emb) {
-        n_img_tokens = (int64_t) in.n_img_views * cfg.n_img;
-        img_emb_host.assign(in.precomputed_img_emb, in.precomputed_img_emb + (size_t) n_img_tokens * hidden_pl);
+        p.n_img_tokens = (int64_t) in.n_img_views * cfg.n_img;
+        p.img_emb_host.assign(in.precomputed_img_emb,
+                              in.precomputed_img_emb + (size_t) p.n_img_tokens * hidden_pl);
     } else {
         if (in.n_images < 1 || !in.images) {
-            std::fprintf(stderr, "vla(pi05): predict: no images and no precomputed_img_emb\n");
-            return {};
+            std::fprintf(stderr, "vla(pi05): prepare: no images and no precomputed_img_emb\n");
+            p.ok = false;
+            p.error = "no images and no precomputed_img_emb";
+            return p;
         }
         const int     img_sz          = clip_get_image_size(cctx);
         const size_t  per_pix         = (size_t) 3 * img_sz * img_sz;
@@ -1155,15 +1217,17 @@ std::vector<float> Pi05Model::predict(const Inputs & in) {
 
         std::vector<float> hwc(per_pix);
         const auto         tv0 = clk::now();
-        img_emb_host.clear();
-        img_emb_host.reserve(per_out * (size_t) in.n_images);
+        p.img_emb_host.clear();
+        p.img_emb_host.reserve(per_out * (size_t) in.n_images);
 
         for (int v = 0; v < in.n_images; ++v) {
             const ImageView & view = in.images[v];
             if (view.w != img_sz || view.h != img_sz) {
                 std::fprintf(stderr, "vla(pi05): image[%d] is %dx%d; π0.5 requires %dx%d\n", v, view.w, view.h, img_sz,
                              img_sz);
-                return {};
+                p.ok = false;
+                p.error = "bad image size";
+                return p;
             }
             if (view.format == PixelFormat::U8) {
                 const uint8_t * src = static_cast<const uint8_t *>(view.data);
@@ -1180,7 +1244,9 @@ std::vector<float> Pi05Model::predict(const Inputs & in) {
             std::vector<float> view_emb(per_out);
             if (!clip_encode_float_image(cctx, n_threads, hwc.data(), img_sz, img_sz, view_emb.data())) {
                 std::fprintf(stderr, "vla(pi05): clip_encode_float_image failed (view %d)\n", v);
-                return {};
+                p.ok = false;
+                p.error = "clip_encode_float_image failed";
+                return p;
             }
 
             // DEBUG dump of raw vision embeddings (env VLA_PI05_DUMP_IMG=1) before pruning
@@ -1221,31 +1287,73 @@ std::vector<float> Pi05Model::predict(const Inputs & in) {
                                  (const void *) attn, n_patches, (long long) v_tokens);
                 }
             }
-            img_emb_host.insert(img_emb_host.end(), view_emb.begin(), view_emb.end());
+            p.img_emb_host.insert(p.img_emb_host.end(), view_emb.begin(), view_emb.end());
             n_img_tokens += v_tokens;
         }
-        stats.ms_vision = std::chrono::duration<float, std::milli>(clk::now() - tv0).count();
+        {
+            std::lock_guard<std::mutex> lk(stats_mu_);
+            stats.ms_vision = std::chrono::duration<float, std::milli>(clk::now() - tv0).count();
+        }
     }
+    p.n_img_tokens = n_img_tokens;
 
+    // ── SEG2: language embedding lookup ──
     if (in.n_lang < 1 || !in.lang_tokens) {
-        std::fprintf(stderr, "vla(pi05): predict: empty lang_tokens\n");
-        return {};
+        std::fprintf(stderr, "vla(pi05): prepare: empty lang_tokens\n");
+        p.ok = false;
+        p.error = "empty lang_tokens";
+        return p;
     }
-    const int64_t n_lang   = in.n_lang;
-    const int64_t n_prefix = n_img_tokens + n_lang;
-    const int64_t n_total  = n_prefix + n_suf;
-
-    std::vector<int32_t> lang_ids(in.lang_tokens, in.lang_tokens + n_lang);
-    std::vector<float>   lang_rows((size_t) n_lang * hidden_pl);
+    const int64_t          n_lang = in.n_lang;
+    std::vector<int32_t>   lang_ids(in.lang_tokens, in.lang_tokens + n_lang);
+    p.lang_rows.resize((size_t) n_lang * hidden_pl);
     {
         gguf_reader g;
         if (!g.open(ckpt_path_)) {
-            return {};
+            p.ok = false;
+            p.error = "gguf_reader open failed";
+            return p;
         }
-        if (!g.fetch_rows_f32("token_embd.weight", lang_ids, lang_rows.data(), hidden_pl)) {
-            return {};
+        if (!g.fetch_rows_f32("token_embd.weight", lang_ids, p.lang_rows.data(), hidden_pl)) {
+            p.ok = false;
+            p.error = "token_embd.weight lookup failed";
+            return p;
         }
     }
+    p.n_lang = n_lang;
+
+    if (in.noise) p.noise.assign(in.noise, in.noise + (size_t) cfg.max_action_dim * chunk);
+    if (in.prev_chunk && in.n_prev_chunk > 0) {
+        p.prev_chunk.assign(in.prev_chunk, in.prev_chunk + (size_t) in.n_prev_chunk * cfg.real_action_dim);
+        p.n_prev_chunk = in.n_prev_chunk;
+    }
+    if (in.attention_mask && in.attention_mask_n > 0)
+        p.attention_mask.assign(in.attention_mask, in.attention_mask + in.attention_mask_n);
+    p.timing_detail = in.timing_detail;
+    p.ok = true;
+    return p;
+}
+
+std::vector<float> Pi05Model::compute_actions(const PreparedInput & p) {
+    using clk = std::chrono::high_resolution_clock;
+
+    const Config & cfg       = this->cfg;
+    const int64_t  hidden_pl = cfg.hidden;
+    const int64_t  hidden_ex = cfg.expert_h;
+    const int64_t  chunk     = cfg.n_suffix;
+    const int64_t  n_suf     = chunk;
+    const int64_t  n_layers  = cfg.n_layers;
+    const int64_t  max_ad    = cfg.max_action_dim;
+    const int      num_steps = cfg.num_steps;
+    const float    dt        = -1.0f / (float) num_steps;
+    const float    rope_base = cfg.rope_freq_base;
+
+    const int64_t n_img_tokens = p.n_img_tokens;
+    const int64_t n_lang       = p.n_lang;
+    const int64_t n_prefix     = n_img_tokens + n_lang;
+    const int64_t n_total      = n_prefix + n_suf;
+
+    init_rtc_config();
 
     // ── Cached compute graph: rebuilt only when the input token counts change ──
     // (server is single-threaded REQ/REP, so one cached graph is safe to reuse)
@@ -1256,7 +1364,10 @@ std::vector<float> Pi05Model::predict(const Inputs & in) {
         return e && std::atoi(e) > 0;
     }();
     const bool need_rebuild =
-        no_cache || (gf_ == nullptr || c_n_img_tokens_ != n_img_tokens || c_n_lang_ != n_lang || c_n_suf_ != n_suf);
+        no_cache ||
+        (gf_ == nullptr || c_n_img_tokens_ != n_img_tokens || c_n_lang_ != n_lang || c_n_suf_ != n_suf ||
+         c_rtc_         != (int64_t) rtc_enabled_ ||
+         c_rtc_horizon_ != (int64_t) rtc_horizon_);
     if (need_rebuild) {
         if (galloc_) {
             ggml_gallocr_free(galloc_);
@@ -1269,6 +1380,7 @@ std::vector<float> Pi05Model::predict(const Inputs & in) {
         gf_          = nullptr;
         x_final_     = nullptr;
         t_image_emb_ = t_lang_emb_ = t_prefix_pos_ = t_x0_ = t_suffix_pos_ = t_full_mask_ = nullptr;
+        t_prev_chunk_ = t_rtc_weights_ = nullptr;
         t_time_.clear();
 
         ggml_init_params cp = { (size_t) 64 * 1024 * 1024, nullptr, true };
@@ -1291,6 +1403,12 @@ std::vector<float> Pi05Model::predict(const Inputs & in) {
         ggml_set_input(t_suffix_pos_);
         t_full_mask_ = ggml_new_tensor_2d(C, GGML_TYPE_F32, n_total, n_suf);
         ggml_set_input(t_full_mask_);
+        if (rtc_enabled_) {
+            t_prev_chunk_  = ggml_new_tensor_2d(C, GGML_TYPE_F32, max_ad, chunk);
+            ggml_set_input(t_prev_chunk_);
+            t_rtc_weights_ = ggml_new_tensor_2d(C, GGML_TYPE_F32, max_ad, chunk);
+            ggml_set_input(t_rtc_weights_);
+        }
         t_time_.resize(num_steps);
         for (int s = 0; s < num_steps; ++s) {
             t_time_[s] = ggml_new_tensor_2d(C, GGML_TYPE_F32, hidden_ex, 1);
@@ -1321,6 +1439,19 @@ std::vector<float> Pi05Model::predict(const Inputs & in) {
             // The final expert norm is also AdaRMS; its gate output is ignored by OpenPI.
             ggml_tensor * h_final = adarms_norm(C, h, ex_final_norm_W, ex_final_norm_b, adarms_cond, cfg, nullptr);
             ggml_tensor * v_t     = ggml_add(C, ggml_mul_mat(C, W_aout, h_final), b_aout);
+            if (rtc_enabled_) {
+                // RTC prefix guidance (LeRobot modeling_rtc.denoise_step):
+                //   x1_t = x_t - time*v_t
+                //   err  = (prev_chunk - x1_t) * weights
+                //   v_t -= min(c*inv_r2, max_guidance) * err
+                // First-order is EXACT here: LeRobot computes v_t before enabling
+                // grad on x_t, so autograd.grad(x1_t, x_t)[0] == err (identity).
+                const float time = 1.0f + (float) step * dt;
+                ggml_tensor * x1_est = ggml_sub(C, x_t, ggml_scale(C, v_t, time));
+                ggml_tensor * diff   = ggml_sub(C, t_prev_chunk_, x1_est);
+                ggml_tensor * err    = ggml_mul(C, diff, t_rtc_weights_);
+                v_t = ggml_sub(C, v_t, ggml_scale(C, err, rtc_step_guidance_[step]));
+            }
             x_t                   = ggml_add(C, x_t, ggml_scale(C, v_t, dt));
         }
         x_final_ = x_t;
@@ -1349,11 +1480,13 @@ std::vector<float> Pi05Model::predict(const Inputs & in) {
         c_n_img_tokens_ = n_img_tokens;
         c_n_lang_       = n_lang;
         c_n_suf_        = n_suf;
+        c_rtc_          = rtc_enabled_ ? 1 : 0;
+        c_rtc_horizon_  = rtc_enabled_ ? rtc_horizon_ : 0;
     }
 
     // ── upload inputs (every request) ──
-    ggml_backend_tensor_set(t_image_emb_, img_emb_host.data(), 0, ggml_nbytes(t_image_emb_));
-    ggml_backend_tensor_set(t_lang_emb_, lang_rows.data(), 0, ggml_nbytes(t_lang_emb_));
+    ggml_backend_tensor_set(t_image_emb_, p.img_emb_host.data(), 0, ggml_nbytes(t_image_emb_));
+    ggml_backend_tensor_set(t_lang_emb_, p.lang_rows.data(), 0, ggml_nbytes(t_lang_emb_));
     {
         std::vector<int32_t> pp(n_prefix);
         for (int64_t i = 0; i < n_prefix; ++i) {
@@ -1368,15 +1501,77 @@ std::vector<float> Pi05Model::predict(const Inputs & in) {
     }
     {
         std::vector<float> x0h((size_t) max_ad * chunk);
-        if (in.noise) {
-            std::memcpy(x0h.data(), in.noise, x0h.size() * sizeof(float));
+        if (p.noise.size() == (size_t) max_ad * chunk) {
+            std::memcpy(x0h.data(), p.noise.data(), x0h.size() * sizeof(float));
         } else {
             std::normal_distribution<float> nd(0.f, 1.f);
             for (auto & v : x0h) {
                 v = nd(rng);
             }
         }
+        // RTC x0 inpainting: seed the leftover prefix into the initial noise so the
+        // flow trajectory starts from the executed prefix (VLA_PI05_RTC_X0_INPAINT=1).
+        if (rtc_x0_inpaint_ && p.n_prev_chunk > 0) {
+            const int64_t L = std::min((int64_t) rtc_horizon_, p.n_prev_chunk);
+            for (int64_t t = 0; t < L; ++t) {
+                for (int64_t j = 0; j < cfg.real_action_dim; ++j) {
+                    const float xr = p.prev_chunk[(size_t) t * cfg.real_action_dim + j];
+                    if (action_norm_mode == "MEAN_STD")
+                        x0h[(size_t) t * max_ad + j] = (xr - action_mean[j]) / (action_std[j] + cfg.norm_eps);
+                    else {
+                        const float denom = action_q99[j] - action_q01[j];
+                        x0h[(size_t) t * max_ad + j] = 2.0f * (xr - action_q01[j]) / denom - 1.0f;
+                    }
+                }
+            }
+        }
         ggml_backend_tensor_set(t_x0_, x0h.data(), 0, ggml_nbytes(t_x0_));
+    }
+    if (rtc_enabled_) {
+        // RTC prev_chunk: real units -> normalized latent, laid out [max_ad, chunk].
+        // Rows beyond real_action_dim stay 0 (never guided).
+        std::vector<float> prevh((size_t) max_ad * chunk, 0.f);
+        if (p.n_prev_chunk > 0) {
+            const int64_t nt = std::min(p.n_prev_chunk, chunk);
+            for (int64_t t = 0; t < nt; ++t) {
+                for (int64_t j = 0; j < cfg.real_action_dim; ++j) {
+                    const float xr = p.prev_chunk[(size_t) t * cfg.real_action_dim + j];
+                    if (action_norm_mode == "MEAN_STD")
+                        prevh[(size_t) t * max_ad + j] = (xr - action_mean[j]) / (action_std[j] + cfg.norm_eps);
+                    else {
+                        const float denom = action_q99[j] - action_q01[j];
+                        prevh[(size_t) t * max_ad + j] = 2.0f * (xr - action_q01[j]) / denom - 1.0f;
+                    }
+                }
+            }
+        }
+        ggml_backend_tensor_set(t_prev_chunk_, prevh.data(), 0, ggml_nbytes(t_prev_chunk_));
+
+        // RTC weights: schedule weights on real action rows; ALL ZEROS when no
+        // leftover -> err == 0 -> v_t untouched (bit-exact baseline preserved).
+        // The execution horizon is clamped to the actual leftover length, matching
+        // LeRobot denoise_step: execution_horizon = min(config, leftover.shape[1]).
+        // Rows beyond the leftover carry zero weight -> no garbage guidance.
+        std::vector<float> wgh((size_t) max_ad * chunk, 0.f);
+        if (p.n_prev_chunk > 0) {
+            const int L = (int) std::min<int64_t>(rtc_horizon_, p.n_prev_chunk);
+            const int D = std::min(rtc_delay_, L);
+            std::vector<float> sched((size_t) chunk, 0.f);
+            for (int i = 0; i < D; ++i) sched[(size_t) i] = 1.f;
+            if (L > D) {
+                const float denom = (float) (L - D) + 1.0f;
+                const float em1   = std::exp(1.0f) - 1.0f;
+                for (int i = D; i < L; ++i) {
+                    float w = ((float) L - (float) i) / denom;
+                    if (rtc_schedule_ == "exp") w = w * std::expm1(w) / em1;
+                    sched[(size_t) i] = w;
+                }
+            }
+            for (int64_t t = 0; t < chunk; ++t)
+                for (int64_t j = 0; j < cfg.real_action_dim; ++j)
+                    wgh[(size_t) t * max_ad + j] = sched[(size_t) t];
+        }
+        ggml_backend_tensor_set(t_rtc_weights_, wgh.data(), 0, ggml_nbytes(t_rtc_weights_));
     }
     if (!flash_attn_) {
         // Flash attention uses a null mask, so t_full_mask_ is not part of the
@@ -1393,7 +1588,10 @@ std::vector<float> Pi05Model::predict(const Inputs & in) {
     // ── compute + read output ──
     const auto        ti0 = clk::now();
     const ggml_status st  = ggml_backend_graph_compute(backend, gf_);
-    stats.ms_inference    = std::chrono::duration<float, std::milli>(clk::now() - ti0).count();
+    {
+        std::lock_guard<std::mutex> lk(stats_mu_);
+        stats.ms_inference = std::chrono::duration<float, std::milli>(clk::now() - ti0).count();
+    }
     if (st != GGML_STATUS_SUCCESS) {
         std::fprintf(stderr, "vla(pi05): ggml_backend_graph_compute failed (%d)\n", (int) st);
         return {};
@@ -1412,8 +1610,19 @@ std::vector<float> Pi05Model::predict(const Inputs & in) {
             }
         }
     }
+    return out;
+}
 
-    stats.ms_total = std::chrono::duration<float, std::milli>(clk::now() - t0).count();
+std::vector<float> Pi05Model::predict(const Inputs & in) {
+    using clk = std::chrono::high_resolution_clock;
+    const auto t0 = clk::now();
+    PreparedInput p = prepare_inputs(in);
+    if (!p.ok) return {};
+    std::vector<float> out = compute_actions(p);
+    {
+        std::lock_guard<std::mutex> lk(stats_mu_);
+        stats.ms_total = std::chrono::duration<float, std::milli>(clk::now() - t0).count();
+    }
     return out;
 }
 

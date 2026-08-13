@@ -140,6 +140,15 @@ struct Inputs {
     const float * state;                    ///< Proprioception, length @c real_state_dim.
     const float * noise;                    ///< Initial noise for the action expert.
 
+    /// RTC (Real-Time Chunking): leftover (unexecuted prefix) of the previous
+    /// action chunk, in real (world) units, row-major
+    /// @c [n_prev_chunk, real_action_dim].  When non-null with
+    /// @c n_prev_chunk > 0 the denoise loop steers each step's velocity toward
+    /// the executed prefix (server must be launched with VLA_PI05_RTC=1).
+    const float * prev_chunk   = nullptr;
+    int           n_prev_chunk = 0;         ///< Number of leftover steps in
+                                            ///  @ref prev_chunk (0 = disabled).
+
     /// Optional override for the language attention mask (per-token).
     const int32_t * attention_mask   = nullptr;
     int             attention_mask_n = 0;  ///< Length of @ref attention_mask.
@@ -149,6 +158,31 @@ struct Inputs {
     const ModelInputExtension * model_specific = nullptr;
 
     TimingDetail timing_detail = TimingDetail::NONE;
+};
+
+/**
+ * @brief Prepared host-side inputs for the two-phase inference interface.
+ *
+ * Produced by @ref prepare (vision encoding + language embedding lookup) and
+ * consumed by @ref compute (graph upload + compute + de-normalization).
+ * Owns all buffers so the caller can destroy the request after @ref prepare.
+ */
+struct PreparedInput {
+    std::vector<float> img_emb_host;   ///< Encoded image embeddings (row-major).
+    int64_t            n_img_tokens = 0; ///< Total image-token count.
+
+    std::vector<float> lang_rows;      ///< Language embedding rows.
+    int64_t            n_lang = 0;     ///< Number of language tokens.
+
+    std::vector<float> noise;          ///< Initial noise; empty = model RNG.
+    std::vector<float> prev_chunk;     ///< RTC leftover prefix (real units).
+    int64_t            n_prev_chunk = 0; ///< Number of leftover steps.
+
+    std::vector<int32_t> attention_mask;
+    TimingDetail       timing_detail = TimingDetail::NONE;
+
+    bool               ok = true;     ///< @ref prepare succeeded.
+    std::string        error;         ///< Error message when @c ok is false.
 };
 
 /**
@@ -191,6 +225,20 @@ const Config & model_config(const Model * m);
  *         row-major order.
  */
 std::vector<float> predict(Model * m, const Inputs & in);
+
+/**
+ * @brief Two-phase inference interface (server-side async pipelining).
+ *
+ * @ref prepare runs the vision tower and language embedding lookup on the
+ * receive thread; @ref compute runs graph upload, compute, and
+ * de-normalization on the inference thread.  Together they reproduce
+ * @ref predict bit-for-bit, but allow the two phases to overlap across
+ * requests (hidden pre-processing latency).
+ *
+ * Implemented by pi0.5; other architectures return @c ok=false / empty vector.
+ */
+PreparedInput prepare(Model * m, const Inputs & in);
+std::vector<float> compute(Model * m, const PreparedInput & p);
 
 /**
  * @brief Wall-clock timings of the most recent @ref predict call.

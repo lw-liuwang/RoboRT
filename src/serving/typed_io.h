@@ -89,6 +89,9 @@ struct Observation {
     std::vector<float>     proprioception;
     std::vector<float>     action_history;
     std::vector<float>     noise;
+    /// RTC leftover prefix (real units, row-major [n_prev_chunk, action_dim]).
+    /// Empty = RTC guidance disabled.
+    std::vector<float>     prev_chunk;
 
     std::vector<NamedTensorView> extra_inputs;
 };
