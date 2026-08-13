@@ -46,6 +46,11 @@ message PredictRequest {
   uint32         precomputed_img_emb_n_views = 7;
 
   repeated uint32 attention_mask = 8;
+
+  // RTC (Real-Time Chunking): leftover (unexecuted prefix) of the previous
+  // action chunk, in real (world) units, row-major
+  // [n_prev_chunk, max_action_dim].  Empty = RTC guidance disabled.
+  repeated float prev_chunk = 9;
 }
 
 message PredictResponse {

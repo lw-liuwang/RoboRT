@@ -5,9 +5,9 @@ namespace serving {
 
 std::atomic<bool> ZmqServerBase::s_shutdown_{ false };
 
-ZmqServerBase::ZmqServerBase(const std::string & bind_addr) :
+ZmqServerBase::ZmqServerBase(const std::string & bind_addr, zmq::socket_type type) :
     zctx_(1),
-    sock_(zctx_, zmq::socket_type::rep),
+    sock_(zctx_, type),
     bind_addr_(bind_addr) {
     int linger = 0;
     sock_.setsockopt(ZMQ_LINGER, &linger, sizeof(linger));

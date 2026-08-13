@@ -47,6 +47,9 @@ struct ModelInputStorage {
     std::vector<float>          state;
     std::vector<float>          noise;
 
+    /// RTC leftover prefix (real units, row-major [n_prev_chunk, action_dim]).
+    std::vector<float> prev_chunk;
+
     /// Model-specific input extension (borrowed, not owned).  Populated
     /// by the @ref VlaModelInputAdapter model-specific builder callback
     /// or by the caller directly.

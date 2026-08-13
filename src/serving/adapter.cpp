@@ -67,6 +67,7 @@ AdapterStatus VlaModelInputAdapter::build(const Observation & observation, Model
     out->language_tokens = observation.language_tokens;
     out->state.clear();
     out->noise.clear();
+    out->prev_chunk = observation.prev_chunk;
     out->inputs = {};
 
     out->image_views.reserve(observation.images.size());
@@ -112,6 +113,9 @@ AdapterStatus VlaModelInputAdapter::build(const Observation & observation, Model
     out->inputs.n_lang         = static_cast<int>(out->language_tokens.size());
     out->inputs.state          = out->state.empty() ? nullptr : out->state.data();
     out->inputs.noise          = out->noise.empty() ? nullptr : out->noise.data();
+    out->inputs.prev_chunk     = out->prev_chunk.empty() ? nullptr : out->prev_chunk.data();
+    out->inputs.n_prev_chunk   = static_cast<int>(out->prev_chunk.size() /
+                                                  (config_.action_dim > 0 ? config_.action_dim : 1));
     out->inputs.model_specific = out->model_specific;
 
     if (model_specific_builder_) {
