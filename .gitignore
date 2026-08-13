@@ -4,7 +4,7 @@
 *.o
 *.a
 *.so
-
+models/
 # ── 模型权重 / 大文件（不入云端代码库）───────────────────
 *.gguf
 *.safetensors
@@ -51,3 +51,5 @@ core.*
 *.synctex.gz
 *.fls
 *.fdb_latexmk
+
+local/

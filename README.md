@@ -53,10 +53,10 @@ CUDA_VISIBLE_DEVICES=1 VLA_PI05_SEED=42 \
 
 ## 效果对比
 
-| LeRobot 基线 | RoboRT |
-|:------------------:|:------------------:|
-| ![LeRobot 基线](docs/figs/lerobot.gif) | ![RoboRT](docs/figs/robort.gif) |
-| **377 ms/step** | **161 ms/step** |
+| LeRobot 基线 | RoboRT | RoboRT Async + RTC |
+|:------------------:|:------------------:|:------------------:|
+| ![LeRobot 基线](docs/figs/lerobot.gif) | ![RoboRT](docs/figs/robort.gif) | ![RoboRT Async + RTC](docs/figs/async_rtc.gif) |
+| **377 ms/step** | **161 ms/step** | **18.7 ms/step** |
 
 ## 技术报告
 
