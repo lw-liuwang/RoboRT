@@ -427,12 +427,21 @@ static bool ends_with(const std::string & s, const char * sfx) {
 struct Pi05Model final : public Model {
     ~Pi05Model() override;
 
-    std::vector<float> predict(const Inputs & in);
+    const Config & config() const override { return cfg; }
+
+    const Stats & last_stats() const override { return stats; }
+
+    std::vector<float> predict(const Inputs & in) override;
+
+    PreparedInput prepare(const Inputs & in) override { return prepare_inputs(in); }
+
+    std::vector<float> compute(const PreparedInput & p) override { return compute_actions(p); }
+
     PreparedInput      prepare_inputs(const Inputs & in);
     std::vector<float> compute_actions(const PreparedInput & p);
 
-    Stats  stats{};  ///< Phase timings of the most recent predict.
-    Config cfg{};    ///< Resolved model hyper-parameters.
+    Stats      stats{};    ///< Phase timings of the most recent predict.
+    Config     cfg{};      ///< Resolved model hyper-parameters.
     std::mutex stats_mu_;  ///< Guards @ref stats (async server: two threads).
 
     clip_ctx *            cctx        = nullptr;
@@ -474,37 +483,51 @@ struct Pi05Model final : public Model {
 
     // RTC (Real-Time Chunking) cached-graph inputs: prev_chunk prefix guidance
     // and the per-step schedule weights. Both are uploaded every request.
-    ggml_tensor * t_prev_chunk_  = nullptr;   // [max_ad, chunk] latent leftover
-    ggml_tensor * t_rtc_weights_ = nullptr;   // [max_ad, chunk] schedule weights
-    int64_t c_rtc_         = 0;               // rtc_enabled_ at graph-build time
-    int64_t c_rtc_horizon_ = 0;               // rtc_horizon_ at graph-build time
+    ggml_tensor * t_prev_chunk_  = nullptr;  // [max_ad, chunk] latent leftover
+    ggml_tensor * t_rtc_weights_ = nullptr;  // [max_ad, chunk] schedule weights
+    int64_t       c_rtc_         = 0;        // rtc_enabled_ at graph-build time
+    int64_t       c_rtc_horizon_ = 0;        // rtc_horizon_ at graph-build time
 
     // RTC configuration (read from env once; default off = bit-exact baseline).
-    bool rtc_initialized_ = false;
-    bool rtc_enabled_     = false;
-    int  rtc_horizon_     = 10;               // execution horizon (VLA_PI05_RTC_HORIZON)
-    int  rtc_delay_       = 0;                // inference delay prefix (VLA_PI05_RTC_DELAY)
-    float rtc_max_guidance_ = 10.0f;          // max guidance weight (VLA_PI05_RTC_GUIDANCE)
-    std::string rtc_schedule_ = "linear";     // linear / ones / exp (VLA_PI05_RTC_SCHEDULE)
-    bool rtc_x0_inpaint_  = false;            // inject leftover into x0 (VLA_PI05_RTC_X0_INPAINT)
-    std::vector<float> rtc_step_guidance_;    // per-step guidance weight [num_steps]
+    bool               rtc_initialized_  = false;
+    bool               rtc_enabled_      = false;
+    int                rtc_horizon_      = 10;        // execution horizon (VLA_PI05_RTC_HORIZON)
+    int                rtc_delay_        = 0;         // inference delay prefix (VLA_PI05_RTC_DELAY)
+    float              rtc_max_guidance_ = 10.0f;     // max guidance weight (VLA_PI05_RTC_GUIDANCE)
+    std::string        rtc_schedule_     = "linear";  // linear / ones / exp (VLA_PI05_RTC_SCHEDULE)
+    bool               rtc_x0_inpaint_   = false;     // inject leftover into x0 (VLA_PI05_RTC_X0_INPAINT)
+    std::vector<float> rtc_step_guidance_;            // per-step guidance weight [num_steps]
 
     void init_rtc_config() {
-        if (rtc_initialized_) return;
+        if (rtc_initialized_) {
+            return;
+        }
         rtc_initialized_ = true;
-        if (const char * e = std::getenv("VLA_PI05_RTC"); e && std::atoi(e) > 0) rtc_enabled_ = true;
-        if (const char * e = std::getenv("VLA_PI05_RTC_HORIZON");  e && std::atoi(e) >= 1)  rtc_horizon_  = std::atoi(e);
-        if (const char * e = std::getenv("VLA_PI05_RTC_DELAY");    e && std::atoi(e) >= 0)  rtc_delay_    = std::atoi(e);
-        if (const char * e = std::getenv("VLA_PI05_RTC_GUIDANCE"); e && std::atof(e) > 0.f) rtc_max_guidance_ = (float) std::atof(e);
-        if (const char * e = std::getenv("VLA_PI05_RTC_SCHEDULE"); e && e[0])               rtc_schedule_ = e;
-        if (const char * e = std::getenv("VLA_PI05_RTC_X0_INPAINT"); e && std::atoi(e) > 0) rtc_x0_inpaint_ = true;
+        if (const char * e = std::getenv("VLA_PI05_RTC"); e && std::atoi(e) > 0) {
+            rtc_enabled_ = true;
+        }
+        if (const char * e = std::getenv("VLA_PI05_RTC_HORIZON"); e && std::atoi(e) >= 1) {
+            rtc_horizon_ = std::atoi(e);
+        }
+        if (const char * e = std::getenv("VLA_PI05_RTC_DELAY"); e && std::atoi(e) >= 0) {
+            rtc_delay_ = std::atoi(e);
+        }
+        if (const char * e = std::getenv("VLA_PI05_RTC_GUIDANCE"); e && std::atof(e) > 0.f) {
+            rtc_max_guidance_ = (float) std::atof(e);
+        }
+        if (const char * e = std::getenv("VLA_PI05_RTC_SCHEDULE"); e && e[0]) {
+            rtc_schedule_ = e;
+        }
+        if (const char * e = std::getenv("VLA_PI05_RTC_X0_INPAINT"); e && std::atoi(e) > 0) {
+            rtc_x0_inpaint_ = true;
+        }
         if (rtc_enabled_) {
             // Per-step guidance weight (LeRobot modeling_rtc.denoise_step):
             //   tau = 1 - time; c = time/tau;
             //   inv_r2 = (time^2 + tau^2) / time^2;
             //   guidance = min(c*inv_r2, max);  time = 1 -> 1/N (tau = s/N).
-            const int num_steps = (int) cfg.num_steps;
-            const float max_g = rtc_max_guidance_;
+            const int   num_steps = (int) cfg.num_steps;
+            const float max_g     = rtc_max_guidance_;
             rtc_step_guidance_.assign(num_steps, max_g);
             for (int s = 0; s < num_steps; ++s) {
                 const float time = 1.0f - (float) s / (float) num_steps;
@@ -512,14 +535,16 @@ struct Pi05Model final : public Model {
                 if (tau > 0.f) {
                     const float c      = time / tau;
                     const float inv_r2 = (time * time + tau * tau) / (time * time);
-                    float g = c * inv_r2;
-                    if (!(g > 0.f) || g > max_g) g = max_g; // NaN/Inf -> clamp to max
+                    float       g      = c * inv_r2;
+                    if (!(g > 0.f) || g > max_g) {
+                        g = max_g;  // NaN/Inf -> clamp to max
+                    }
                     rtc_step_guidance_[s] = g;
                 }
             }
             std::printf("vla(pi05): RTC enabled: horizon=%d delay=%d guidance=%.1f schedule=%s inpaint=%d steps=%d\n",
-                        rtc_horizon_, rtc_delay_, rtc_max_guidance_, rtc_schedule_.c_str(),
-                        rtc_x0_inpaint_ ? 1 : 0, num_steps);
+                        rtc_horizon_, rtc_delay_, rtc_max_guidance_, rtc_schedule_.c_str(), rtc_x0_inpaint_ ? 1 : 0,
+                        num_steps);
         }
     }
 
@@ -901,7 +926,9 @@ Pi05Model::~Pi05Model() {
     }
 }
 
-Model * model_load(const std::string & mmproj_path, const std::string & ckpt_path, const std::string & config_path) {
+std::unique_ptr<Model> pi05_create(const std::string & mmproj_path,
+                                   const std::string & ckpt_path,
+                                   const std::string & config_path) {
     (void) config_path;
 
     if (!ends_with(ckpt_path, ".gguf")) {
@@ -1140,31 +1167,7 @@ Model * model_load(const std::string & mmproj_path, const std::string & ckpt_pat
         return nullptr;
     }
     std::printf("vla(pi05): model loaded (n_threads=%d)\n", m->n_threads);
-    return m.release();
-}
-
-void model_free(Model * m) {
-    delete m;
-}
-
-const Config & model_config(const Model * m) {
-    return static_cast<const Pi05Model *>(m)->cfg;
-}
-
-const Stats & last_stats(const Model * m) {
-    return static_cast<const Pi05Model *>(m)->stats;
-}
-
-std::vector<float> predict(Model * m, const Inputs & in) {
-    return static_cast<Pi05Model *>(m)->predict(in);
-}
-
-PreparedInput prepare(Model * m, const Inputs & in) {
-    return static_cast<Pi05Model *>(m)->prepare_inputs(in);
-}
-
-std::vector<float> compute(Model * m, const PreparedInput & p) {
-    return static_cast<Pi05Model *>(m)->compute_actions(p);
+    return m;
 }
 
 PreparedInput Pi05Model::prepare_inputs(const Inputs & in) {
@@ -1183,12 +1186,11 @@ PreparedInput Pi05Model::prepare_inputs(const Inputs & in) {
 
     if (in.precomputed_img_emb) {
         p.n_img_tokens = (int64_t) in.n_img_views * cfg.n_img;
-        p.img_emb_host.assign(in.precomputed_img_emb,
-                              in.precomputed_img_emb + (size_t) p.n_img_tokens * hidden_pl);
+        p.img_emb_host.assign(in.precomputed_img_emb, in.precomputed_img_emb + (size_t) p.n_img_tokens * hidden_pl);
     } else {
         if (in.n_images < 1 || !in.images) {
             std::fprintf(stderr, "vla(pi05): prepare: no images and no precomputed_img_emb\n");
-            p.ok = false;
+            p.ok    = false;
             p.error = "no images and no precomputed_img_emb";
             return p;
         }
@@ -1225,7 +1227,7 @@ PreparedInput Pi05Model::prepare_inputs(const Inputs & in) {
             if (view.w != img_sz || view.h != img_sz) {
                 std::fprintf(stderr, "vla(pi05): image[%d] is %dx%d; π0.5 requires %dx%d\n", v, view.w, view.h, img_sz,
                              img_sz);
-                p.ok = false;
+                p.ok    = false;
                 p.error = "bad image size";
                 return p;
             }
@@ -1244,7 +1246,7 @@ PreparedInput Pi05Model::prepare_inputs(const Inputs & in) {
             std::vector<float> view_emb(per_out);
             if (!clip_encode_float_image(cctx, n_threads, hwc.data(), img_sz, img_sz, view_emb.data())) {
                 std::fprintf(stderr, "vla(pi05): clip_encode_float_image failed (view %d)\n", v);
-                p.ok = false;
+                p.ok    = false;
                 p.error = "clip_encode_float_image failed";
                 return p;
             }
@@ -1300,37 +1302,40 @@ PreparedInput Pi05Model::prepare_inputs(const Inputs & in) {
     // ── SEG2: language embedding lookup ──
     if (in.n_lang < 1 || !in.lang_tokens) {
         std::fprintf(stderr, "vla(pi05): prepare: empty lang_tokens\n");
-        p.ok = false;
+        p.ok    = false;
         p.error = "empty lang_tokens";
         return p;
     }
-    const int64_t          n_lang = in.n_lang;
-    std::vector<int32_t>   lang_ids(in.lang_tokens, in.lang_tokens + n_lang);
+    const int64_t        n_lang = in.n_lang;
+    std::vector<int32_t> lang_ids(in.lang_tokens, in.lang_tokens + n_lang);
     p.lang_rows.resize((size_t) n_lang * hidden_pl);
     {
         gguf_reader g;
         if (!g.open(ckpt_path_)) {
-            p.ok = false;
+            p.ok    = false;
             p.error = "gguf_reader open failed";
             return p;
         }
         if (!g.fetch_rows_f32("token_embd.weight", lang_ids, p.lang_rows.data(), hidden_pl)) {
-            p.ok = false;
+            p.ok    = false;
             p.error = "token_embd.weight lookup failed";
             return p;
         }
     }
     p.n_lang = n_lang;
 
-    if (in.noise) p.noise.assign(in.noise, in.noise + (size_t) cfg.max_action_dim * chunk);
+    if (in.noise) {
+        p.noise.assign(in.noise, in.noise + (size_t) cfg.max_action_dim * chunk);
+    }
     if (in.prev_chunk && in.n_prev_chunk > 0) {
         p.prev_chunk.assign(in.prev_chunk, in.prev_chunk + (size_t) in.n_prev_chunk * cfg.real_action_dim);
         p.n_prev_chunk = in.n_prev_chunk;
     }
-    if (in.attention_mask && in.attention_mask_n > 0)
+    if (in.attention_mask && in.attention_mask_n > 0) {
         p.attention_mask.assign(in.attention_mask, in.attention_mask + in.attention_mask_n);
+    }
     p.timing_detail = in.timing_detail;
-    p.ok = true;
+    p.ok            = true;
     return p;
 }
 
@@ -1364,10 +1369,8 @@ std::vector<float> Pi05Model::compute_actions(const PreparedInput & p) {
         return e && std::atoi(e) > 0;
     }();
     const bool need_rebuild =
-        no_cache ||
-        (gf_ == nullptr || c_n_img_tokens_ != n_img_tokens || c_n_lang_ != n_lang || c_n_suf_ != n_suf ||
-         c_rtc_         != (int64_t) rtc_enabled_ ||
-         c_rtc_horizon_ != (int64_t) rtc_horizon_);
+        no_cache || (gf_ == nullptr || c_n_img_tokens_ != n_img_tokens || c_n_lang_ != n_lang || c_n_suf_ != n_suf ||
+                     c_rtc_ != (int64_t) rtc_enabled_ || c_rtc_horizon_ != (int64_t) rtc_horizon_);
     if (need_rebuild) {
         if (galloc_) {
             ggml_gallocr_free(galloc_);
@@ -1404,7 +1407,7 @@ std::vector<float> Pi05Model::compute_actions(const PreparedInput & p) {
         t_full_mask_ = ggml_new_tensor_2d(C, GGML_TYPE_F32, n_total, n_suf);
         ggml_set_input(t_full_mask_);
         if (rtc_enabled_) {
-            t_prev_chunk_  = ggml_new_tensor_2d(C, GGML_TYPE_F32, max_ad, chunk);
+            t_prev_chunk_ = ggml_new_tensor_2d(C, GGML_TYPE_F32, max_ad, chunk);
             ggml_set_input(t_prev_chunk_);
             t_rtc_weights_ = ggml_new_tensor_2d(C, GGML_TYPE_F32, max_ad, chunk);
             ggml_set_input(t_rtc_weights_);
@@ -1446,13 +1449,13 @@ std::vector<float> Pi05Model::compute_actions(const PreparedInput & p) {
                 //   v_t -= min(c*inv_r2, max_guidance) * err
                 // First-order is EXACT here: LeRobot computes v_t before enabling
                 // grad on x_t, so autograd.grad(x1_t, x_t)[0] == err (identity).
-                const float time = 1.0f + (float) step * dt;
+                const float   time   = 1.0f + (float) step * dt;
                 ggml_tensor * x1_est = ggml_sub(C, x_t, ggml_scale(C, v_t, time));
                 ggml_tensor * diff   = ggml_sub(C, t_prev_chunk_, x1_est);
                 ggml_tensor * err    = ggml_mul(C, diff, t_rtc_weights_);
-                v_t = ggml_sub(C, v_t, ggml_scale(C, err, rtc_step_guidance_[step]));
+                v_t                  = ggml_sub(C, v_t, ggml_scale(C, err, rtc_step_guidance_[step]));
             }
-            x_t                   = ggml_add(C, x_t, ggml_scale(C, v_t, dt));
+            x_t = ggml_add(C, x_t, ggml_scale(C, v_t, dt));
         }
         x_final_ = x_t;
         ggml_set_output(x_final_);
@@ -1516,10 +1519,10 @@ std::vector<float> Pi05Model::compute_actions(const PreparedInput & p) {
             for (int64_t t = 0; t < L; ++t) {
                 for (int64_t j = 0; j < cfg.real_action_dim; ++j) {
                     const float xr = p.prev_chunk[(size_t) t * cfg.real_action_dim + j];
-                    if (action_norm_mode == "MEAN_STD")
+                    if (action_norm_mode == "MEAN_STD") {
                         x0h[(size_t) t * max_ad + j] = (xr - action_mean[j]) / (action_std[j] + cfg.norm_eps);
-                    else {
-                        const float denom = action_q99[j] - action_q01[j];
+                    } else {
+                        const float denom            = action_q99[j] - action_q01[j];
                         x0h[(size_t) t * max_ad + j] = 2.0f * (xr - action_q01[j]) / denom - 1.0f;
                     }
                 }
@@ -1536,10 +1539,10 @@ std::vector<float> Pi05Model::compute_actions(const PreparedInput & p) {
             for (int64_t t = 0; t < nt; ++t) {
                 for (int64_t j = 0; j < cfg.real_action_dim; ++j) {
                     const float xr = p.prev_chunk[(size_t) t * cfg.real_action_dim + j];
-                    if (action_norm_mode == "MEAN_STD")
+                    if (action_norm_mode == "MEAN_STD") {
                         prevh[(size_t) t * max_ad + j] = (xr - action_mean[j]) / (action_std[j] + cfg.norm_eps);
-                    else {
-                        const float denom = action_q99[j] - action_q01[j];
+                    } else {
+                        const float denom              = action_q99[j] - action_q01[j];
                         prevh[(size_t) t * max_ad + j] = 2.0f * (xr - action_q01[j]) / denom - 1.0f;
                     }
                 }
@@ -1554,22 +1557,28 @@ std::vector<float> Pi05Model::compute_actions(const PreparedInput & p) {
         // Rows beyond the leftover carry zero weight -> no garbage guidance.
         std::vector<float> wgh((size_t) max_ad * chunk, 0.f);
         if (p.n_prev_chunk > 0) {
-            const int L = (int) std::min<int64_t>(rtc_horizon_, p.n_prev_chunk);
-            const int D = std::min(rtc_delay_, L);
+            const int          L = (int) std::min<int64_t>(rtc_horizon_, p.n_prev_chunk);
+            const int          D = std::min(rtc_delay_, L);
             std::vector<float> sched((size_t) chunk, 0.f);
-            for (int i = 0; i < D; ++i) sched[(size_t) i] = 1.f;
+            for (int i = 0; i < D; ++i) {
+                sched[(size_t) i] = 1.f;
+            }
             if (L > D) {
                 const float denom = (float) (L - D) + 1.0f;
                 const float em1   = std::exp(1.0f) - 1.0f;
                 for (int i = D; i < L; ++i) {
                     float w = ((float) L - (float) i) / denom;
-                    if (rtc_schedule_ == "exp") w = w * std::expm1(w) / em1;
+                    if (rtc_schedule_ == "exp") {
+                        w = w * std::expm1(w) / em1;
+                    }
                     sched[(size_t) i] = w;
                 }
             }
-            for (int64_t t = 0; t < chunk; ++t)
-                for (int64_t j = 0; j < cfg.real_action_dim; ++j)
+            for (int64_t t = 0; t < chunk; ++t) {
+                for (int64_t j = 0; j < cfg.real_action_dim; ++j) {
                     wgh[(size_t) t * max_ad + j] = sched[(size_t) t];
+                }
+            }
         }
         ggml_backend_tensor_set(t_rtc_weights_, wgh.data(), 0, ggml_nbytes(t_rtc_weights_));
     }
@@ -1614,10 +1623,12 @@ std::vector<float> Pi05Model::compute_actions(const PreparedInput & p) {
 }
 
 std::vector<float> Pi05Model::predict(const Inputs & in) {
-    using clk = std::chrono::high_resolution_clock;
-    const auto t0 = clk::now();
-    PreparedInput p = prepare_inputs(in);
-    if (!p.ok) return {};
+    using clk        = std::chrono::high_resolution_clock;
+    const auto    t0 = clk::now();
+    PreparedInput p  = prepare_inputs(in);
+    if (!p.ok) {
+        return {};
+    }
     std::vector<float> out = compute_actions(p);
     {
         std::lock_guard<std::mutex> lk(stats_mu_);

@@ -83,12 +83,39 @@ struct Config {
     float vis_pruner_ratio  = 0.5f;  ///< Ratio of importance-based tokens in the target count
 };
 
+// Forward declarations; full definitions appear below (they are only used by
+// reference in the Model interface).
+struct Inputs;
+struct PreparedInput;
+struct Stats;
+
 /**
  * @brief Engine handle; created by @ref model_load and released by
- * @ref model_free. Subclassed by the concrete architecture implementation.
+ * @ref model_free. Subclassed by the concrete architecture implementation
+ * (pi0.5, HY-VLA, ...), which overrides the pure virtual interface below.
+ * @ref model_load inspects the checkpoint metadata and routes to the matching
+ * subclass.
  */
 struct Model {
     virtual ~Model() = default;
+
+    /// @brief Resolved hyper-parameters of the loaded model (see @ref Config).
+    virtual const Config & config() const = 0;
+
+    /// @brief Phase timings of the most recent @ref predict call.
+    virtual const Stats & last_stats() const = 0;
+
+    /// @brief Run one forward pass (see @ref predict).
+    virtual std::vector<float> predict(const Inputs & in) = 0;
+
+    /// @brief Phase 1 of the two-phase interface (see @ref prepare).
+    ///        Architectures without two-phase support return
+    ///        @c PreparedInput{ok=false}.
+    virtual PreparedInput prepare(const Inputs & in) = 0;
+
+    /// @brief Phase 2 of the two-phase interface (see @ref compute).
+    ///        Architectures without two-phase support return an empty vector.
+    virtual std::vector<float> compute(const PreparedInput & p) = 0;
 };
 
 /**
@@ -146,8 +173,8 @@ struct Inputs {
     /// @c n_prev_chunk > 0 the denoise loop steers each step's velocity toward
     /// the executed prefix (server must be launched with VLA_PI05_RTC=1).
     const float * prev_chunk   = nullptr;
-    int           n_prev_chunk = 0;         ///< Number of leftover steps in
-                                            ///  @ref prev_chunk (0 = disabled).
+    int           n_prev_chunk = 0;  ///< Number of leftover steps in
+                                     ///  @ref prev_chunk (0 = disabled).
 
     /// Optional override for the language attention mask (per-token).
     const int32_t * attention_mask   = nullptr;
@@ -168,30 +195,37 @@ struct Inputs {
  * Owns all buffers so the caller can destroy the request after @ref prepare.
  */
 struct PreparedInput {
-    std::vector<float> img_emb_host;   ///< Encoded image embeddings (row-major).
-    int64_t            n_img_tokens = 0; ///< Total image-token count.
+    std::vector<float> img_emb_host;      ///< Encoded image embeddings (row-major).
+    int64_t            n_img_tokens = 0;  ///< Total image-token count.
 
-    std::vector<float> lang_rows;      ///< Language embedding rows.
-    int64_t            n_lang = 0;     ///< Number of language tokens.
+    std::vector<float> lang_rows;         ///< Language embedding rows.
+    int64_t            n_lang = 0;        ///< Number of language tokens.
 
-    std::vector<float> noise;          ///< Initial noise; empty = model RNG.
-    std::vector<float> prev_chunk;     ///< RTC leftover prefix (real units).
-    int64_t            n_prev_chunk = 0; ///< Number of leftover steps.
+    std::vector<float> noise;             ///< Initial noise; empty = model RNG.
+    std::vector<float> prev_chunk;        ///< RTC leftover prefix (real units).
+    int64_t            n_prev_chunk = 0;  ///< Number of leftover steps.
 
     std::vector<int32_t> attention_mask;
-    TimingDetail       timing_detail = TimingDetail::NONE;
+    TimingDetail         timing_detail = TimingDetail::NONE;
 
-    bool               ok = true;     ///< @ref prepare succeeded.
-    std::string        error;         ///< Error message when @c ok is false.
+    bool        ok = true;  ///< @ref prepare succeeded.
+    std::string error;      ///< Error message when @c ok is false.
 };
 
 /**
- * @brief Load a model from a vision-tower GGUF (mmproj) + checkpoint GGUF.
+ * @brief Load a model, dispatching to the architecture detected from the
+ *        checkpoint metadata (pi0.5, HY-VLA, ...).
+ *
+ * The checkpoint's GGUF KV (@c pi05.architecture / @c hy_vla.architecture)
+ * selects the implementation. pi0.5 needs a separate vision-tower mmproj GGUF;
+ * HY-VLA bundles vision + VLM + action-expert into a single checkpoint GGUF
+ * (pass an empty @p mmproj_path).
  *
  * Fails loud: a missing file, unknown architecture, or shape mismatch aborts
  * rather than returning a half-initialised handle.
  *
- * @param mmproj_path Path to the vision-tower GGUF.
+ * @param mmproj_path Path to the vision-tower GGUF (empty for bundled-vision
+ *                    architectures such as HY-VLA).
  * @param ckpt_path   Path to the main checkpoint GGUF.
  * @param config_path Optional JSON override; empty to use bundled config.
  * @return Owning handle. Free with @ref model_free.
@@ -237,7 +271,7 @@ std::vector<float> predict(Model * m, const Inputs & in);
  *
  * Implemented by pi0.5; other architectures return @c ok=false / empty vector.
  */
-PreparedInput prepare(Model * m, const Inputs & in);
+PreparedInput      prepare(Model * m, const Inputs & in);
 std::vector<float> compute(Model * m, const PreparedInput & p);
 
 /**
