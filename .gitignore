@@ -1,10 +1,12 @@
 # ── 编译产物 ───────────────────────────────────────────────
 /build/
 /build-cpu/
+/build-cross/
+/build-x86-ref/
 *.o
 *.a
 *.so
-models/
+/models/
 # ── 模型权重 / 大文件（不入云端代码库）───────────────────
 *.gguf
 *.safetensors
@@ -17,6 +19,7 @@ checkpoints/
 
 # ── 评估输出（生成物，不入库）─────────────────────────────
 outputs/
+eval-outputs/
 
 # ── Python ────────────────────────────────────────────────
 __pycache__/
@@ -33,6 +36,7 @@ core.*
 .vscode/
 .idea/
 *.swp
+.claude/
 
 # ── 环境变量 / 密钥 ───────────────────────────────────────
 .env
@@ -52,4 +56,13 @@ core.*
 *.fls
 *.fdb_latexmk
 
-local/
+local/*
+# AGX Orin 交叉编译/部署文件（local/agx-orin/ 白名单）
+!local/agx-orin/
+!local/agx-orin/toolchain-aarch64.cmake
+!local/agx-orin/build-cross.sh
+!local/agx-orin/DEPLOY.md
+!local/agx-orin/client.cpp
+!local/agx-orin/vla.pb.cc
+!local/agx-orin/vla.pb.h
+local/agx-orin/vla-pi05-client

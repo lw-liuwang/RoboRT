@@ -7,10 +7,47 @@
 
 find_package(Threads REQUIRED)
 
+# VLA architectures to build, space-separated (e.g. "pi05 hy_vla").
+# Empty (default) = build every architecture in src/models/architectures.cmake.
+# Each selected arch defines a VLA_HAS_<ARCH> macro on the library; the
+# dispatcher in api/model.cpp wires only the compiled architectures, and the
+# selection is data-driven from src/models/architectures.cmake so new models
+# only require a row there.
+set(ROBORT_MODELS "" CACHE STRING
+    "VLA architectures to build, space-separated (empty = all in src/models/architectures.cmake)")
+
+include(models/architectures.cmake)
+
+# Resolve selection: empty -> all registered architectures.  ROBORT_MODELS may
+# use spaces or semicolons as separators (a command-line -D value arrives as a
+# single space-separated string, so split it explicitly).
+string(REPLACE " " ";" VLA_SELECT "${ROBORT_MODELS}")
+if(NOT VLA_SELECT)
+    set(VLA_SELECT ${VLA_ARCH_KEYS})
+endif()
+
+set(VLA_MODEL_SOURCES "")
+set(VLA_MODEL_DEFS "")
+foreach(VLA_ARCH IN LISTS VLA_SELECT)
+    if(NOT DEFINED VLA_ARCH_${VLA_ARCH}_SRC)
+        message(FATAL_ERROR "Unknown ROBORT_MODELS entry '${VLA_ARCH}' (registered: ${VLA_ARCH_KEYS})")
+    endif()
+    list(APPEND VLA_MODEL_SOURCES ${VLA_ARCH_${VLA_ARCH}_SRC})
+    list(APPEND VLA_MODEL_DEFS     ${VLA_ARCH_${VLA_ARCH}_DEF})
+endforeach()
+list(REMOVE_DUPLICATES VLA_MODEL_SOURCES)
+list(REMOVE_DUPLICATES VLA_MODEL_DEFS)
+list(REMOVE_DUPLICATES VLA_SELECT)
+if(NOT VLA_MODEL_SOURCES)
+    message(FATAL_ERROR "ROBORT_MODELS resolved to no architectures (registered: ${VLA_ARCH_KEYS})")
+endif()
+message(STATUS "RoboRT architectures to build: ${VLA_SELECT}")
+
 set(TARGET vla-pi05)
 add_library(${TARGET}
             api/model.h
-            models/pi05/pi05.cpp)
+            api/model.cpp
+            ${VLA_MODEL_SOURCES})
 
 set_target_properties(${TARGET} PROPERTIES
     VERSION ${LLAMA_INSTALL_VERSION}
@@ -19,6 +56,7 @@ set_target_properties(${TARGET} PROPERTIES
 
 target_link_libraries     (${TARGET} PUBLIC mtmd)
 target_link_libraries     (${TARGET} PRIVATE Threads::Threads)
+target_compile_definitions(${TARGET} PRIVATE ${VLA_MODEL_DEFS})
 target_include_directories(${TARGET} PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/api)
 target_compile_features   (${TARGET} PRIVATE cxx_std_17)
 
