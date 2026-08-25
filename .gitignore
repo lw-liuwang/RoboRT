@@ -57,12 +57,3 @@ core.*
 *.fdb_latexmk
 
 local/*
-# AGX Orin 交叉编译/部署文件（local/agx-orin/ 白名单）
-!local/agx-orin/
-!local/agx-orin/toolchain-aarch64.cmake
-!local/agx-orin/build-cross.sh
-!local/agx-orin/DEPLOY.md
-!local/agx-orin/client.cpp
-!local/agx-orin/vla.pb.cc
-!local/agx-orin/vla.pb.h
-local/agx-orin/vla-pi05-client

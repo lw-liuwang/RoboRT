@@ -20,25 +20,6 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
 cmake --build build --target vla-pi05-server vla-pi05-selfcheck -j$(nproc)
 ```
 
-### 交叉编译（NVIDIA Jetson AGX Orin / aarch64）
-
-支持交叉编译到 aarch64（目标：AGX Orin，sm_87 集成 GPU + CUDA 12.6 / JetPack 6.x），
-toolchain 定义见 `local/agx-orin/toolchain-aarch64.cmake`，一键脚本见
-`local/agx-orin/build-cross.sh`：
-
-```bash
-cmake -S . -B build-cross -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_TOOLCHAIN_FILE=local/agx-orin/toolchain-aarch64.cmake \
-  -DGGML_CUDA=ON -DGGML_CUDA_NCCL=OFF -DGGML_CUDA_NO_VMM=ON
-cmake --build build-cross --target vla-pi05-server vla-pi05-selfcheck -j$(nproc)
-```
-
-产物在 `build-cross/bin/`（`vla-pi05-server`、`vla-pi05-selfcheck`、`libggml*.so`、
-`libmtmd.so`、`libvla-pi05.so`，全部为 ELF AArch64）。
-
-> ⚠️ 关键约束：必须用 CUDA 12.6 的 nvcc 交叉编译（离线编 sm_87 cubin）。
-> CUDA 13 编出的 cubin 要求驱动 >= 570，而 Orin 驱动为 540.4.0，加载会失败。
-
 ### 模型转换
 
 ```bash
@@ -55,8 +36,8 @@ python src/models/hy_vla/convert_hy_vla_to_gguf.py \
   --norm-stats <norm_stats.pkl>   # 可选（归一化统计，见下）；缺失时用恒等归一化
 ```
 
-- `--norm-stats`：`local/Hy-Embodied-0.5-VLA/scripts/compute_norm_robotwin.py`
-  产出的 `norm_stats.pkl`（发行版 checkpoint 用 `--downsample-rate 3 --chunk-size 20`）。
+- `--norm-stats`：归一化统计 `norm_stats.pkl`（由 Hy-Embodied-0.5-VLA 官方仓库的
+  `scripts/compute_norm_robotwin.py` 产出；发行版 checkpoint 用 `--downsample-rate 3 --chunk-size 20`）。
 - 产出约 1282 个张量、~9GiB（bf16），与参考 `Hy-Embodied-0.5-VLA-RoboTwin_bf16.gguf`
   结构一致（权重全 BF16、`norm.*` 统计 F32）。
 
@@ -108,8 +89,7 @@ CUDA_VISIBLE_DEVICES=1 VLA_HY_VLA_TEXT_LAYERS=32 VLA_HY_VLA_VISION_LAYERS=27 \
 
 #### HY-VLA
 
-- 支持状态：已打通 Orin 部署路径（`VLA_HY_VLA_TEXT_LAYERS=32 VLA_HY_VLA_VISION_LAYERS=27`），
-  模型转换、运行、FAQ 见 [local/agx-orin/DEPLOY.md](local/agx-orin/DEPLOY.md)
+- 支持状态：已打通 Orin 部署路径（`VLA_HY_VLA_TEXT_LAYERS=32 VLA_HY_VLA_VISION_LAYERS=27`）
 - LIBERO 评测结果：待补充
 
 ### NVIDIA A10（历史数据，桌面端）
