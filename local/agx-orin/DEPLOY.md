@@ -30,6 +30,10 @@
 - `pi05-mmproj.gguf`（832MB）、`pi05.gguf`（**6.1GB**）
 - `pi05_tokenizer/`
 
+HY-VLA 模型（转换脚本 `src/models/hy_vla/convert_hy_vla_to_gguf.py`，宿主机 `models/` 下）：
+
+- `hy_vla.gguf`（**~9GiB，bf16**，1282 个张量，单文件含双塔 VLM + 视觉塔 + flow expert + 归一化统计）
+
 验证工具（本仓库随附，交叉编译产物）：
 
 - `vla-pi05-client` — 最小 REQ 客户端（本地 `local/agx-orin/`，用 `client.cpp` + `vla.proto`
@@ -152,6 +156,23 @@ LD_LIBRARY_PATH=$PWD/bin ./bin/vla-pi05-client tcp://127.0.0.1:5555
 #   action_chunk_size=1600；latency_ms total≈888 inference≈465（首请求含 kernel 编译）
 ```
 
+### 4.6 HY-VLA（双塔 VLM + flow expert，单 GGUF）
+
+同一 `vla-pi05-server` 二进制按 GGUF 内 `hy_vla.architecture` 自动分派，无需 mmproj /
+tokenizer：
+
+```bash
+cd ~/robort
+VLA_HY_VLA_TEXT_LAYERS=32 VLA_HY_VLA_VISION_LAYERS=27 LD_LIBRARY_PATH=$PWD/bin \
+  ./bin/vla-pi05-server --bind tcp://*:5555 --timing-detail phase \
+  models/hy_vla.gguf
+```
+
+- `VLA_HY_VLA_TEXT_LAYERS=32` / `VLA_HY_VLA_VISION_LAYERS=27`：发行版模型必须显式设置
+  （不设则只加载 suffix expert，无法完整推理）
+- bf16 全模型 ~9GiB，AGX Orin 64GiB 统一内存可容纳；仍紧张时可在加载期量化
+  （`VLA_HY_VLA_WEIGHT_DTYPE=q4_K`，见 FAQ）
+
 ---
 
 ## 4A. 分布式运行：仿真在本机，推理在 Orin
@@ -194,6 +215,9 @@ CUDA_VISIBLE_DEVICES=0 VLA_PI05_SEED=42 python eval.py --vla-addr tcp://172.21.1
 | 推理奇慢（~秒/步） | GPU 没启用，掉进 CPU 后端；确认 `nvidia-smi` 有进程、server 日志是 CUDA |
 | `vla-pi05-server` 端口被占 | `pgrep -a vla-pi05-server`，先 kill 旧的 |
 | RTC 无效果 | server 启动缺 `VLA_PI05_RTC=1` |
+| HY-VLA 启动后只跑 suffix expert（无 VLM 推理） | 缺 `VLA_HY_VLA_TEXT_LAYERS=32 VLA_HY_VLA_VISION_LAYERS=27`（发行版必须显式设置，不设默认 0） |
+| HY-VLA 显存不足 / OOM | bf16 全模型 ~9GiB，AGX Orin 64GiB 统一内存通常可容纳；仍紧张时加载期量化 `VLA_HY_VLA_WEIGHT_DTYPE=q4_K`，或开 `VLA_HY_VLA_CUDA_OOM_FALLBACK_CPU`（部分层落 CPU） |
+| HY-VLA 权重精度选择 | `VLA_HY_VLA_WEIGHT_DTYPE` 支持 `f32`/`bf16`/`q8_0`/`q6_K`/`q5_K`/`q4_K`/`q4_0`（默认 bf16）；量化档位越低显存越省，精度略降 |
 
 ---
 
