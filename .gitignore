@@ -14,12 +14,11 @@
 checkpoints/
 *.jpg
 *.jpeg
-*.png
 *.mp4
 
 # ── 评估输出（生成物，不入库）─────────────────────────────
 outputs/
-eval-outputs/
+eval-outputs/*
 
 # ── Python ────────────────────────────────────────────────
 __pycache__/

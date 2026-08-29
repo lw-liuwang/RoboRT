@@ -14,8 +14,8 @@
 
 | 模型 | 硬件 | 推理延迟 | 参考基线 | 加速倍数 |
 |---|---|---:|---:|---:|
-| [$\pi_{0.5}$](docs/models/pi05.md) | AGX Orin | **104.3 ms/step** | — | — |
-| [$\pi_{0.5}$](docs/models/pi05.md) | A10 | **18.7 ms/step** (Async+RTC) | 377 ms (LeRobot) | **~20×** |
+| [π0.5](docs/models/pi05.md) | AGX Orin | **104.3 ms/step** | — | — |
+| [π0.5](docs/models/pi05.md) | A10 | **18.7 ms/step** (Async+RTC) | 377 ms (LeRobot) | **~20×** |
 | [Hy-Embodied-0.5-VLA](docs/models/hy_vla.md) | A10 | — | — | — |
 | [FasterWAM](docs/models/fasterwam.md) | A10 | **7.2 ms/step** (稳态) | ~501,000 ms (CPU) | **~70,000×** |
 
