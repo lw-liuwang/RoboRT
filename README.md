@@ -1,6 +1,23 @@
+<div align="center">
+
+<img src="docs/figs/robort_icon.png" width="120"/>
+
 # RoboRT
 
-机器人大模型推理引擎，支持 [$\pi_{0.5}$](https://github.com/Physical-Intelligence/openpi)、[Hy-Embodied-0.5-VLA](https://github.com/Tencent-Hunyuan/Hy-Embodied-0.5-VLA)、[FasterWAM](https://github.com/hustvl/FasterWAM)。
+**A Robot Model Inference Engine**
+
+</div>
+
+---
+
+## 支持的模型
+
+| 模型 | 硬件 | 推理延迟 | 参考基线 | 加速倍数 |
+|---|---|---:|---:|---:|
+| [$\pi_{0.5}$](docs/models/pi05.md) | AGX Orin | **104.3 ms/step** | — | — |
+| [$\pi_{0.5}$](docs/models/pi05.md) | A10 | **18.7 ms/step** (Async+RTC) | 377 ms (LeRobot) | **~20×** |
+| [Hy-Embodied-0.5-VLA](docs/models/hy_vla.md) | A10 | — | — | — |
+| [FasterWAM](docs/models/fasterwam.md) | A10 | **7.2 ms/step** (稳态) | ~501,000 ms (CPU) | **~70,000×** |
 
 ## 编译
 

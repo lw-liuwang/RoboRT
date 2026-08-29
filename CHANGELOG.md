@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## RoboRT v2.0
 
 ### Added
 
