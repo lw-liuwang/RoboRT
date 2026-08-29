@@ -1,6 +1,11 @@
 # RoboRT
 
-机器人大模型推理引擎
+机器人大模型推理引擎（Robot Brain Inference Engine）
+
+支持的架构：
+- **pi0.5**（Physical Intelligence）
+- **HY-VLA**（腾讯 Hy-Embodied-0.5-VLA）
+- **FasterWAM**（流匹配动作扩散，纯动作推理，无视觉塔）
 
 ## 环境搭建与编译
 
@@ -17,63 +22,75 @@
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
   -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=86
-cmake --build build --target vla-pi05-server vla-pi05-selfcheck -j$(nproc)
+cmake --build build --target robort-server robort-selfcheck -j$(nproc)
 ```
 
+> `vla-pi05-server` / `vla-pi05-selfcheck` 作为别名仍然有效（向后兼容）。
+
 ### 模型转换
+
+**pi0.5**
 
 ```bash
 python src/models/pi05/convert_pi05_mmproj_to_gguf.py <hf_mmproj_dir> pi05-mmproj.gguf
 python src/models/pi05/convert_pi05_to_gguf.py       <hf_ckpt_dir>    pi05.gguf
 ```
 
-HY-VLA（腾讯 Hy-Embodied-0.5-VLA）转换到单文件 GGUF（双塔 VLM + 视觉塔 + flow
-expert + 归一化统计全在一份文件里，无需 mmproj / tokenizer）：
+**HY-VLA**（腾讯 Hy-Embodied-0.5-VLA）单文件 GGUF（双塔 VLM + 视觉塔 + flow expert + 归一化统计）：
 
 ```bash
 python src/models/hy_vla/convert_hy_vla_to_gguf.py \
   --ckpt <hf_ckpt_dir> --out hy_vla.gguf \
-  --norm-stats <norm_stats.pkl>   # 可选（归一化统计，见下）；缺失时用恒等归一化
+  --norm-stats <norm_stats.pkl>   # 可选；缺失时用恒等归一化
 ```
 
-- `--norm-stats`：归一化统计 `norm_stats.pkl`（由 Hy-Embodied-0.5-VLA 官方仓库的
-  `scripts/compute_norm_robotwin.py` 产出；发行版 checkpoint 用 `--downsample-rate 3 --chunk-size 20`）。
-- 产出约 1282 个张量、~9GiB（bf16），与参考 `Hy-Embodied-0.5-VLA-RoboTwin_bf16.gguf`
-  结构一致（权重全 BF16、`norm.*` 统计 F32）。
+- `--norm-stats`：由官方仓库 `scripts/compute_norm_robotwin.py` 产出（`--downsample-rate 3 --chunk-size 20`）
+
+**FasterWAM**（hustvl/FasterWAM）单文件 GGUF：
+
+```bash
+python src/models/fasterwam/convert_fasterwam_to_gguf.py \
+  --ckpt <checkpoint.pt> --stats <dataset_stats.json> --out fasterwam.gguf
+```
 
 ## 运行
 
-```bash
-CUDA_VISIBLE_DEVICES=1 VLA_PI05_SEED=42 \
-  ./build/bin/vla-pi05-server --bind tcp://*:5555 --timing-detail phase \
-  <pi05-mmproj.gguf> <pi05.gguf>
+**pi0.5**
 
-CUDA_VISIBLE_DEVICES=1 VLA_PI05_SEED=42 \
-  ./build/bin/vla-pi05-selfcheck <pi05-mmproj.gguf> <pi05.gguf> out.txt
+```bash
+CUDA_VISIBLE_DEVICES=0 VLA_PI05_SEED=42 \
+  ./build/bin/robort-server --bind tcp://*:5555 --timing-detail phase \
+  <pi05-mmproj.gguf> <pi05.gguf>
 ```
 
-HY-VLA（单 GGUF 参数；`vla-pi05-server` 按 GGUF 内 `hy_vla.architecture` 自动分派）：
+**HY-VLA**（`robort-server` 按 GGUF 内 `hy_vla.architecture` 自动分派）：
 
 ```bash
-CUDA_VISIBLE_DEVICES=1 VLA_HY_VLA_TEXT_LAYERS=32 VLA_HY_VLA_VISION_LAYERS=27 \
-  ./build/bin/vla-pi05-server --bind tcp://*:5555 --timing-detail phase \
+CUDA_VISIBLE_DEVICES=0 VLA_HY_VLA_TEXT_LAYERS=32 VLA_HY_VLA_VISION_LAYERS=27 \
+  ./build/bin/robort-server --bind tcp://*:5555 --timing-detail phase \
   <hy_vla.gguf>
 ```
 
-> `VLA_HY_VLA_TEXT_LAYERS` / `VLA_HY_VLA_VISION_LAYERS` 控制加载的 VLM 文本层 /
-> 视觉层数（发行版模型为 32 / 27）。不设则只跑 suffix expert，无法完整推理。
+> `VLA_HY_VLA_TEXT_LAYERS` / `VLA_HY_VLA_VISION_LAYERS` 控制加载层数（发行版为 32 / 27）。
+
+**FasterWAM**（`robort-server` 按 `fasterwam.architecture` 自动分派）：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+  ./build/bin/robort-server --bind tcp://*:5555 \
+  <fasterwam.gguf>
+```
 
 ## 性能评估
 
-### NVIDIA Jetson AGX Orin（首发部署目标）
+### NVIDIA Jetson AGX Orin
 
 #### pi0.5
 
 - 评测平台：LIBERO（LeRobot 仿真，经网络连接 AGX Orin 推理）
-- 模型：pi0.5（RoboRT 推理引擎，`--async` + `VLA_PI05_RTC=1`）
+- 模型：pi0.5（RoboRT，`--async` + `VLA_PI05_RTC=1`）
 - 数据集：libero_10 / libero_goal / libero_object / libero_spatial（40 任务）
-- 成功率：**39/40（97.5%）**
-- 平均 infer：**104.3 ms/step**
+- 成功率：**39/40（97.5%）**，平均推理：**104.3 ms/step**
 
 | suite | 成功率 | 平均 infer |
 |---|---:|---:|
@@ -92,19 +109,53 @@ CUDA_VISIBLE_DEVICES=1 VLA_HY_VLA_TEXT_LAYERS=32 VLA_HY_VLA_VISION_LAYERS=27 \
 - 支持状态：已打通 Orin 部署路径（`VLA_HY_VLA_TEXT_LAYERS=32 VLA_HY_VLA_VISION_LAYERS=27`）
 - LIBERO 评测结果：待补充
 
-### NVIDIA A10（历史数据，桌面端）
+### NVIDIA A10
 
 #### pi0.5
 
-- 评测平台：LIBERO（LeRobot 仿真）
-- 模型：pi0.5（RoboRT 推理引擎）
-- 数据集：libero_object
-- 成功率：10/10（libero_object/task_0，seed 42）
+- 数据集：libero_object，成功率：10/10（task_0，seed 42）
 
 | LeRobot 基线 | RoboRT | RoboRT Async + RTC |
 |:------------------:|:------------------:|:------------------:|
 | ![LeRobot 基线](docs/figs/lerobot.gif) | ![RoboRT](docs/figs/robort.gif) | ![RoboRT Async + RTC](docs/figs/async_rtc.gif) |
 | **377 ms/step** | **161 ms/step** | **18.7 ms/step** |
+
+#### FasterWAM（NVIDIA A10，RoboTwin）
+
+全 GPU ggml graph 推理，CUDA graph 加速：
+
+| 调用场景 | 延迟（中位数）| 控制频率 |
+|---|---:|---:|
+| 稳态（text 不变，state 更新）| **7.2 ms/step** | ~139 Hz |
+| text 变化（新任务）| **29.5 ms/step** | ~34 Hz |
+
+- video prefill（text 变时）：22 ms（30 video DiT blocks，A10 内存带宽极限）
+- action denoising（每步）：7 ms（20步 unrolled CUDA graph，30 action DiT blocks）
+- 相较原始 CPU 实现（~501s/step）加速约 **17,000–70,000×**
+
+## C++ API
+
+`policy.h` 提供 `robo::` 命名空间（对 `vla::` 的轻量封装）：
+
+```cpp
+#include "policy.h"
+
+robo::Policy * m = robo::policy_load("", "fasterwam.gguf", "");
+const robo::PolicyConfig & cfg = robo::policy_config(m);
+
+robo::PolicyInput in{};
+in.state = state_data;
+in.noise = noise_data;
+
+// 单步推理
+std::vector<float> actions = robo::step(m, in);
+
+// 两阶段异步推理（服务器流水线）
+robo::PreparedStep ps = robo::prepare(m, in);   // phase 1：prefill
+std::vector<float> actions = robo::compute(m, ps); // phase 2：denoise
+
+robo::policy_free(m);
+```
 
 ## 技术报告
 

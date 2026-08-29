@@ -1,8 +1,10 @@
-# src: RoboRT pi0.5 VLA inference engine + serving.
+# src: RoboRT robot-brain inference engine + serving.
 #
 # Layout is by responsibility:
-#   api/     public C++ API (vla::Config / Inputs / predict / last_stats)
-#   models/  model implementations (pi05/), one directory per architecture
+#   api/     public C++ API (robo:: / vla:: types, predict, last_stats)
+#            policy.h  -- new robo:: namespace (aliases to vla:: for compat)
+#            model.h   -- legacy vla:: namespace (backward compatible)
+#   models/  model implementations, one directory per architecture
 #   serving/ ZeroMQ/Protobuf server, observation adapter, protobuf schema
 
 find_package(Threads REQUIRED)
@@ -43,9 +45,10 @@ if(NOT VLA_MODEL_SOURCES)
 endif()
 message(STATUS "RoboRT architectures to build: ${VLA_SELECT}")
 
-set(TARGET vla-pi05)
+set(TARGET robort)
 add_library(${TARGET}
             api/model.h
+            api/policy.h
             api/model.cpp
             ${VLA_MODEL_SOURCES})
 
@@ -68,18 +71,20 @@ if (BUILD_SHARED_LIBS)
     set_target_properties(${TARGET} PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
-# self-check: dump one VLA_PI05_SEED=42 action chunk so runs can be compared
-# bit-exact against a reference (e.g. the RoboRT wrapper engine).
-set(TARGET vla-pi05-selfcheck)
+# Provide legacy alias so any external cmake consumers using vla-pi05 still work.
+add_library(vla-pi05 ALIAS robort)
+
+# self-check: dump one seed=42 action chunk for bit-exact regression testing.
+set(TARGET robort-selfcheck)
 add_executable(${TARGET} models/pi05/selfcheck.cpp)
-set_target_properties(${TARGET} PROPERTIES OUTPUT_NAME vla-pi05-selfcheck)
+set_target_properties(${TARGET} PROPERTIES OUTPUT_NAME robort-selfcheck)
 if(ROBORT_INSTALL_TOOLS)
     install(TARGETS ${TARGET} RUNTIME)
 endif()
-target_link_libraries  (${TARGET} PRIVATE vla-pi05 Threads::Threads)
+target_link_libraries  (${TARGET} PRIVATE robort Threads::Threads)
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
 
-# vla-pi05-server: ZeroMQ/Protobuf serving for the pi0.5 engine.
+# robort-server: ZeroMQ/Protobuf serving for the RoboRT engine.
 find_package(Protobuf REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(ZeroMQ REQUIRED IMPORTED_TARGET libzmq)
@@ -99,14 +104,14 @@ add_custom_command(
     VERBATIM
 )
 
-set(TARGET vla-pi05-server)
+set(TARGET robort-server)
 add_executable(${TARGET}
     serving/server.cpp
     serving/server_base.cpp
     serving/adapter.cpp
     ${VLA_PROTO_GEN_DIR}/vla.pb.cc
 )
-set_target_properties(${TARGET} PROPERTIES OUTPUT_NAME vla-pi05-server)
+set_target_properties(${TARGET} PROPERTIES OUTPUT_NAME robort-server)
 if(ROBORT_INSTALL_TOOLS)
     install(TARGETS ${TARGET} RUNTIME)
 endif()
@@ -118,7 +123,7 @@ target_include_directories(${TARGET} PRIVATE
     ${Protobuf_INCLUDE_DIR}
 )
 target_link_libraries(${TARGET} PRIVATE
-    vla-pi05
+    robort
     Threads::Threads
     ${Protobuf_LIBRARIES}
     PkgConfig::ZeroMQ

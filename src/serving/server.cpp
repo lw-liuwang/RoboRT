@@ -122,10 +122,10 @@ void usage(const char * prog) {
     std::fprintf(stderr,
                  "usage: %s [--bind ADDR] [--async] [--timing-detail none|phase] [--config PATH] "
                  "[<mmproj.gguf>] <ckpt>\n"
-                 "  <mmproj.gguf>           pi0.5 vision-tower mmproj GGUF. Omit for HY-VLA\n"
-                 "                          and LingBot-VA combined GGUF checkpoints.\n"
-                 "  <ckpt>                  pi0.5, HY-VLA, or LingBot-VA GGUF checkpoint; the\n"
-                 "                          architecture is auto-detected from metadata.\n"
+                 "  <mmproj.gguf>           pi0.5 vision-tower mmproj GGUF. Omit for HY-VLA,\n"
+                 "                          FasterWAM, and other single-GGUF architectures.\n"
+                 "  <ckpt>                  GGUF checkpoint; the architecture is auto-detected\n"
+                 "                          from the GGUF metadata (pi05/hy_vla/fasterwam).\n"
                  "  --bind ADDR             ZMQ bind address (default: tcp://*:5555)\n"
                  "  --async                 dual-thread ROUTER pipeline: vision encoding of\n"
                  "                          request N+1 overlaps graph compute of request N\n"
@@ -664,7 +664,7 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    std::printf("vla-server: loading model ...\n");
+    std::printf("robort-server: loading model ...\n");
     if (!mmproj_path.empty()) {
         std::printf("  mmproj: %s\n", mmproj_path.c_str());
     }
@@ -677,11 +677,11 @@ int main(int argc, char ** argv) {
     }
     vla::Model * model = vla::model_load(mmproj_path, ckpt_path, config_path);
     if (!model) {
-        std::fprintf(stderr, "vla-server: model_load failed\n");
+        std::fprintf(stderr, "robort-server: model_load failed\n");
         return 1;
     }
     const auto & cfg = vla::model_config(model);
-    std::printf("vla-server: loaded. chunk_size=%lld  action_dim=%lld  "
+    std::printf("robort-server: loaded. chunk_size=%lld  action_dim=%lld  "
                 "n_lang=%lld  hidden=%lld  expert_h=%lld  timing_detail=%s\n",
                 (long long) cfg.n_suffix, (long long) cfg.max_action_dim, (long long) cfg.n_lang, (long long) cfg.hidden,
                 (long long) cfg.expert_h, timing_detail == vla::TimingDetail::PHASE ? "phase" : "none");

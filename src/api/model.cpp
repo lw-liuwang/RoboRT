@@ -14,9 +14,12 @@
 
 /**
  * @file model.cpp
- * @brief Implementation of the public vla API: architecture detection +
+ * @brief Implementation of the public API: architecture detection +
  *        dispatch in @ref vla::model_load, plus the free-function wrappers
  *        that delegate through the @ref vla::Model virtual interface.
+ *
+ * New code should use the @ref robo:: aliases declared in policy.h.  The
+ * vla:: symbols remain for backward compatibility.
  *
  * Adding a new architecture requires touching exactly three places, all marked
  * with an "ARCH:" comment below, plus one row in the build registry
@@ -56,12 +59,19 @@ std::unique_ptr<Model> hy_vla_create(const std::string & mmproj_path,
                                      const std::string & ckpt_path,
                                      const std::string & config_path);
 #endif
+// ARCH: FasterWAM factory declaration.
+#ifdef VLA_HAS_FASTERWAM
+std::unique_ptr<Model> fasterwam_create(const std::string & mmproj_path,
+                                        const std::string & ckpt_path,
+                                        const std::string & config_path);
+#endif
 
 namespace {
 
 enum class Arch {
-    PI05,    ///< Physical Intelligence pi0.5 policy (mmproj + ckpt).
-    HY_VLA,  ///< Tencent Hy-Embodied-0.5-VLA dual-tower flow policy (single GGUF).
+    PI05,       ///< Physical Intelligence pi0.5 policy (mmproj + ckpt).
+    HY_VLA,     ///< Tencent Hy-Embodied-0.5-VLA dual-tower flow policy (single GGUF).
+    FASTERWAM,  ///< HUST FasterWAM World Action Model (Wan2.2 + SparseActionDiT, single GGUF).
 };
 
 bool ends_with_gguf(const std::string & p) {
@@ -100,12 +110,15 @@ bool detect_arch_gguf(const std::string & path, Arch * out) {
     bool        ok = false;
     std::string arch_str;
     if (try_str("general.architecture", arch_str) || try_str("pi05.architecture", arch_str) ||
-        try_str("hy_vla.architecture", arch_str)) {
+        try_str("hy_vla.architecture", arch_str) || try_str("fasterwam.architecture", arch_str)) {
         if (arch_str == "pi05") {
             *out = Arch::PI05;
             ok   = true;
         } else if (arch_str == "hy_vla") {
             *out = Arch::HY_VLA;
+            ok   = true;
+        } else if (arch_str == "fasterwam") {
+            *out = Arch::FASTERWAM;
             ok   = true;
         }
     }
@@ -130,8 +143,8 @@ Model * model_load(const std::string & mmproj_path, const std::string & ckpt_pat
     Arch arch;
     if (!detect_arch_from_ckpt(ckpt_path, &arch)) {
         std::fprintf(stderr,
-                     "vla: cannot detect architecture from %s "
-                     "(unrecognised GGUF KV; expected pi05.architecture or hy_vla.architecture)\n",
+                     "robort: cannot detect architecture from %s "
+                     "(unrecognised GGUF KV; expected pi05/hy_vla/fasterwam .architecture)\n",
                      ckpt_path.c_str());
         return nullptr;
     }
@@ -142,22 +155,32 @@ Model * model_load(const std::string & mmproj_path, const std::string & ckpt_pat
         // is compiled in, and reports a clear error otherwise.
         case Arch::PI05:
 #ifdef VLA_HAS_PI05
-            std::printf("vla: arch = pi05\n");
+            std::printf("robort: arch = pi05\n");
             impl = pi05_create(mmproj_path, ckpt_path, config_path);
 #else
             std::fprintf(stderr,
-                         "vla: pi05 architecture not built "
+                         "robort: pi05 architecture not built "
                          "(reconfigure with ROBORT_MODELS=\"pi05 hy_vla\")\n");
 #endif
             break;
         case Arch::HY_VLA:
 #ifdef VLA_HAS_HY_VLA
-            std::printf("vla: arch = hy_vla\n");
+            std::printf("robort: arch = hy_vla\n");
             impl = hy_vla_create(mmproj_path, ckpt_path, config_path);
 #else
             std::fprintf(stderr,
-                         "vla: hy_vla architecture not built "
+                         "robort: hy_vla architecture not built "
                          "(reconfigure with ROBORT_MODELS=\"pi05 hy_vla\")\n");
+#endif
+            break;
+        case Arch::FASTERWAM:
+#ifdef VLA_HAS_FASTERWAM
+            std::printf("robort: arch = fasterwam\n");
+            impl = fasterwam_create(mmproj_path, ckpt_path, config_path);
+#else
+            std::fprintf(stderr,
+                         "robort: fasterwam architecture not built "
+                         "(reconfigure with ROBORT_MODELS=\"pi05 hy_vla fasterwam\")\n");
 #endif
             break;
     }

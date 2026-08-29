@@ -14,14 +14,19 @@
 
 /**
  * @file model.h
- * @brief Public C++ API of the vla.cpp inference engine.
+ * @brief Legacy public C++ API of the vla.cpp inference engine (vla:: namespace).
  *
- * A @ref vla::Model is the opaque handle returned by @ref vla::model_load.
- * Callers construct an @ref vla::Inputs struct (images, language tokens,
- * proprioception, noise), pass it to @ref vla::predict, and receive a flat
- * vector of normalised actions. @ref vla::model_config exposes the resolved
- * hyper-parameters needed to interpret that vector, and @ref vla::last_stats
- * reports per-phase timings for the most recent call.
+ * @deprecated New code should include policy.h and use the robo:: namespace.
+ *   robo::Policy      = vla::Model
+ *   robo::PolicyInput = vla::Inputs
+ *   robo::step()      = vla::predict()
+ *   policy_load()     = model_load()
+ *
+ * The vla:: symbols remain for backward compatibility.  All architecture
+ * implementations still use vla:: internally.  A @ref vla::Model is the opaque
+ * handle returned by @ref vla::model_load.  Callers construct an @ref vla::Inputs
+ * struct (images, language tokens, proprioception, noise), pass it to
+ * @ref vla::predict, and receive a flat vector of normalised actions.
  */
 
 #pragma once
