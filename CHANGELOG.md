@@ -1,5 +1,37 @@
 # Changelog
 
+## RoboRT v2.1
+
+### Changed
+
+- **pi0.5 源码重构**（`src/models/pi05/`）
+  - 原 1640 行单体 `pi05.cpp` 拆分为 4 个职责单一的编译单元：
+    - `pi05.cpp` — 主模型（`Pi05Model`、`pi05_create`、`predict`）
+    - `pi05_gguf.cpp` / `pi05_gguf.h` — GGUF I/O（`GgufReader`：元数据查询、类型转换、逐行随机读取）
+    - `pi05_graph.cpp` / `pi05_graph.h` — GGML 计算图构建（`build_gemma_layer`、`build_adarms_gemma_layer`、`adarms_norm`、`gated_residual`、`build_embed_suffix`）
+    - `pi05_vispruner.cpp` / `pi05_vispruner.h` — 两阶段视觉 token 剪枝（importance + diversity）
+  - 新增 `pi05_weights.h`（`GemmaLayerW` / `AdaGemmaLayerW` 权重结构体）和 `pi05_utils.h`（`sinusoidal_time_emb`）
+  - 提取 `build_attention()` 内部函数消除 prefix tower 与 action expert 之间约 60 行重复代码
+  - 通过 `.clang-format` / `.clang-tidy`（clang-18）全量检查，零 warning
+
+### Performance（pi0.5，NVIDIA A10，libero_object/task_0，5 episodes）
+
+| 指标 | 数值 |
+|---|---:|
+| 成功率 | **100%** (5/5) |
+| 平均推理步耗（wall-clock） | **18.3 ms/step** |
+| 平均服务端推理延迟 | **143.5 ms/chunk** |
+| 平均每 episode 推理次数 | **17.2 次** |
+| 平均每 episode 动作步数 | **139 步** |
+
+### Eval metrics（客户端）
+
+- `VlaCppClient` 新增 `_infer_count`（每 episode `_predict_chunk` 调用次数）和 `_server_infer_ms`（服务端 `latency_ms_inference`）
+- `AsyncRtcBroker` 同步上述字段，正确累计后台线程的推理计数与延迟
+- `run_libero_eval_lerobot.py` 的 `summary.txt` 新增字段：`Inference count per episode`、`Server inference latency per episode`、`Average server-side inference latency`
+
+---
+
 ## RoboRT v2.0
 
 ### Added

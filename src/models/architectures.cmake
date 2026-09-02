@@ -21,7 +21,12 @@
 #      and marked with "ARCH:" comments.
 set(VLA_ARCH_KEYS pi05 hy_vla fasterwam)
 
-set(VLA_ARCH_pi05_SRC   models/pi05/pi05.cpp)
+set(VLA_ARCH_pi05_SRC
+    models/pi05/pi05.cpp
+    models/pi05/pi05_gguf.cpp
+    models/pi05/pi05_graph.cpp
+    models/pi05/pi05_vispruner.cpp
+)
 set(VLA_ARCH_pi05_DEF   VLA_HAS_PI05)
 
 set(VLA_ARCH_hy_vla_SRC models/hy_vla/hy_vla.cpp)
