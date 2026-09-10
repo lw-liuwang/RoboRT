@@ -2,5 +2,5 @@
 # (src/models/pi05/convert_*_to_gguf.py).
 # The gguf package is vendored under third_party/gguf-py and is not listed here.
 torch==2.13.0
-numpy==2.5.2
+numpy==2.5.3
 safetensors==0.8.0
