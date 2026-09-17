@@ -65,6 +65,12 @@ std::unique_ptr<Model> fasterwam_create(const std::string & mmproj_path,
                                         const std::string & ckpt_path,
                                         const std::string & config_path);
 #endif
+// ARCH: LingBot-VLA-v2 factory declaration.
+#ifdef VLA_HAS_LINGBOT_VLA_V2
+std::unique_ptr<Model> lingbot_vla_v2_create(const std::string & mmproj_path,
+                                             const std::string & ckpt_path,
+                                             const std::string & config_path);
+#endif
 
 namespace {
 
@@ -72,6 +78,7 @@ enum class Arch {
     PI05,       ///< Physical Intelligence pi0.5 policy (mmproj + ckpt).
     HY_VLA,     ///< Tencent Hy-Embodied-0.5-VLA dual-tower flow policy (single GGUF).
     FASTERWAM,  ///< HUST FasterWAM World Action Model (Wan2.2 + SparseActionDiT, single GGUF).
+    LINGBOT_VLA_V2,  ///< Robbyant LingBot-VLA-v2-6B flow-matching VLA (mmproj + ckpt).
 };
 
 bool ends_with_gguf(const std::string & p) {
@@ -110,7 +117,8 @@ bool detect_arch_gguf(const std::string & path, Arch * out) {
     bool        ok = false;
     std::string arch_str;
     if (try_str("general.architecture", arch_str) || try_str("pi05.architecture", arch_str) ||
-        try_str("hy_vla.architecture", arch_str) || try_str("fasterwam.architecture", arch_str)) {
+        try_str("hy_vla.architecture", arch_str) || try_str("fasterwam.architecture", arch_str) ||
+        try_str("lingbot_vla_v2.architecture", arch_str)) {
         if (arch_str == "pi05") {
             *out = Arch::PI05;
             ok   = true;
@@ -119,6 +127,9 @@ bool detect_arch_gguf(const std::string & path, Arch * out) {
             ok   = true;
         } else if (arch_str == "fasterwam") {
             *out = Arch::FASTERWAM;
+            ok   = true;
+        } else if (arch_str == "lingbot_vla_v2") {
+            *out = Arch::LINGBOT_VLA_V2;
             ok   = true;
         }
     }
@@ -181,6 +192,16 @@ Model * model_load(const std::string & mmproj_path, const std::string & ckpt_pat
             std::fprintf(stderr,
                          "robort: fasterwam architecture not built "
                          "(reconfigure with ROBORT_MODELS=\"pi05 hy_vla fasterwam\")\n");
+#endif
+            break;
+        case Arch::LINGBOT_VLA_V2:
+#ifdef VLA_HAS_LINGBOT_VLA_V2
+            std::printf("robort: arch = lingbot_vla_v2\n");
+            impl = lingbot_vla_v2_create(mmproj_path, ckpt_path, config_path);
+#else
+            std::fprintf(stderr,
+                         "robort: lingbot_vla_v2 architecture not built "
+                         "(reconfigure with ROBORT_MODELS=\"pi05 hy_vla lingbot_vla_v2\")\n");
 #endif
             break;
     }

@@ -220,7 +220,10 @@ class VlaServer : public vla::serving::ZmqServerBase {
                                              "PredictRequest must contain images or precomputed_img_emb");
             return false;
         }
-        if (req.lang_tokens_size() < 1 || req.lang_tokens_size() > int(cfg_.n_lang)) {
+        // cfg_.n_lang == 0 means the model takes a per-request language length
+        // (e.g. lingbot_vla_v2): only the lower bound applies then.
+        if (req.lang_tokens_size() < 1 ||
+            (cfg_.n_lang > 0 && req.lang_tokens_size() > int(cfg_.n_lang))) {
             char buf[128];
             std::snprintf(buf, sizeof(buf), "lang_tokens length %d out of range [1, %lld]",
                           req.lang_tokens_size(), (long long) cfg_.n_lang);

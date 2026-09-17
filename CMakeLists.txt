@@ -51,6 +51,7 @@ option(BUILD_SHARED_LIBS "build shared libraries" ${BUILD_SHARED_LIBS_DEFAULT})
 
 option(LLAMA_USE_SYSTEM_GGML        "use system libggml instead of building ggml"     OFF)
 option(ROBORT_INSTALL_TOOLS         "install RoboRT tools"                            ${LLAMA_STANDALONE})
+option(ROBORT_BUILD_SERVER          "build robort-server (needs Protobuf + libzmq)"   ON)
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/build-info.cmake)
 

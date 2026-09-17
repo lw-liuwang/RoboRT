@@ -84,7 +84,20 @@ endif()
 target_link_libraries  (${TARGET} PRIVATE robort Threads::Threads)
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
 
+# lingbot_vla_v2 alignment driver: replays reference inputs (precomputed clip
+# embeddings / tokens / state / noise) and dumps every tapped intermediate for
+# numerical comparison against export_lingbot_vla_v2_reference.py.
+set(TARGET robort-lingbot-v2-selfcheck)
+add_executable(${TARGET} models/lingbot_vla_v2/selfcheck.cpp)
+set_target_properties(${TARGET} PROPERTIES OUTPUT_NAME robort-lingbot-v2-selfcheck)
+if(ROBORT_INSTALL_TOOLS)
+    install(TARGETS ${TARGET} RUNTIME)
+endif()
+target_link_libraries  (${TARGET} PRIVATE robort Threads::Threads)
+target_compile_features(${TARGET} PRIVATE cxx_std_17)
+
 # robort-server: ZeroMQ/Protobuf serving for the RoboRT engine.
+if (ROBORT_BUILD_SERVER)
 find_package(Protobuf REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(ZeroMQ REQUIRED IMPORTED_TARGET libzmq)
@@ -128,3 +141,4 @@ target_link_libraries(${TARGET} PRIVATE
     ${Protobuf_LIBRARIES}
     PkgConfig::ZeroMQ
 )
+endif()

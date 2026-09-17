@@ -3109,7 +3109,15 @@ static bool ggml_cuda_graph_check_compability(ggml_cgraph * cgraph) {
         if (node->op == GGML_OP_MUL_MAT_ID) {
             const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
             const int mmvq_mmid_max = get_mmvq_mmid_max_batch(node->src[0]->type, cc);
-            if (!ggml_is_quantized(node->src[0]->type) || node->ne[2] > mmvq_mmid_max) {
+            bool stream_sync = !ggml_is_quantized(node->src[0]->type) || node->ne[2] > mmvq_mmid_max;
+            if (stream_sync && !ggml_is_quantized(node->src[0]->type)) {
+                // The non-quantized dispatch uses the fused mul_mat_f (mmf) kernel when its
+                // shape requirements hold (see ggml_cuda_mul_mat_id); that path never
+                // synchronizes the stream, so the graph stays capturable.
+                stream_sync = !ggml_cuda_should_use_mmf(node->src[0]->type, cc, WARP_SIZE, node->src[0]->ne,
+                                                        node->src[0]->nb, node->src[1]->ne[2], /*mul_mat_id=*/true);
+            }
+            if (stream_sync) {
                 // under these conditions, the mul_mat_id operation will need to synchronize the stream, so we cannot use CUDA graphs
                 // TODO: figure out a way to enable for larger batch sizes, without hurting performance
                 // ref: https://github.com/ggml-org/llama.cpp/pull/18958

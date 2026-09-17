@@ -19,7 +19,7 @@
 #   3. add the matching per-arch block in src/api/model.cpp (factory
 #      declaration, detection string, dispatch case) -- all three are grouped
 #      and marked with "ARCH:" comments.
-set(VLA_ARCH_KEYS pi05 hy_vla fasterwam)
+set(VLA_ARCH_KEYS pi05 hy_vla fasterwam lingbot_vla_v2)
 
 set(VLA_ARCH_pi05_SRC
     models/pi05/pi05.cpp
@@ -36,3 +36,13 @@ set(VLA_ARCH_hy_vla_DEF VLA_HAS_HY_VLA)
 # Implementation pending GGUF conversion; stub will be replaced in phase 2.
 set(VLA_ARCH_fasterwam_SRC models/fasterwam/fasterwam.cpp)
 set(VLA_ARCH_fasterwam_DEF VLA_HAS_FASTERWAM)
+
+# LingBot-VLA-v2-6B (Robbyant): Qwen3-VL text tower + Qwen2-style flow-matching
+# action expert (AdaRMSNorm + token MoE).  Needs a separate mtmd mmproj GGUF
+# (qwen3vl_merger projector, see convert_lingbot_mmproj_to_gguf.py).
+set(VLA_ARCH_lingbot_vla_v2_SRC
+    models/lingbot_vla_v2/lingbot_vla_v2.cpp
+    models/lingbot_vla_v2/lingbot_vla_v2_gguf.cpp
+    models/lingbot_vla_v2/lingbot_vla_v2_graph.cpp
+)
+set(VLA_ARCH_lingbot_vla_v2_DEF VLA_HAS_LINGBOT_VLA_V2)
